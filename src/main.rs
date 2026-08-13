@@ -12,7 +12,7 @@ use eframe::egui::{self, Color32, RichText, Vec2};
 
 use crate::distribution::{ColorSpace, DEFAULT_PITCH, DEFAULT_YAW, DistributionRenderer};
 use crate::file_browser::{FolderBrowser, Thumbnail, ThumbnailLoader};
-use crate::gpu::{DrtGpu, DrtKind};
+use crate::gpu::{AgxParameters, DrtGpu, DrtKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkspaceView {
@@ -66,12 +66,16 @@ struct DrtApp {
     gpu: DrtGpu,
     exposure_ev: f32,
     overexposure: f32,
+    agx_parameters: AgxParameters,
+    agx_black_hue_retention: f32,
+    agx_white_hue_retention: f32,
+    agx_black_gamut_onset: f32,
     show_anomalies: bool,
     image_name: String,
     status: String,
     status_error: bool,
-    shader_paths: [PathBuf; 2],
-    shader_modified: [Option<std::time::SystemTime>; 2],
+    shader_paths: [PathBuf; 4],
+    shader_modified: [Option<std::time::SystemTime>; 4],
     last_shader_check: std::time::Instant,
     workspace_view: WorkspaceView,
     color_space: ColorSpace,
@@ -102,8 +106,10 @@ impl DrtApp {
             .ok_or_else(|| anyhow::anyhow!("eframe did not create a wgpu render state"))?;
         let shader_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders");
         let shader_paths = [
+            shader_directory.join(DrtKind::None.shader_file()),
             shader_directory.join(DrtKind::Oklab.shader_file()),
             shader_directory.join(DrtKind::AgxS2O3.shader_file()),
+            shader_directory.join(DrtKind::AgxHsv.shader_file()),
         ];
         let shader_modified = shader_paths.each_ref().map(|path| modified_time(path));
         let image = match initial_image {
@@ -129,6 +135,10 @@ impl DrtApp {
             gpu,
             exposure_ev: 0.0,
             overexposure: 1.1,
+            agx_parameters: AgxParameters::default(),
+            agx_black_hue_retention: 1.0,
+            agx_white_hue_retention: 0.5,
+            agx_black_gamut_onset: 0.95,
             show_anomalies: initial_show_anomalies,
             image_name,
             status: folder_browser.as_ref().map_or_else(
@@ -340,12 +350,10 @@ impl eframe::App for DrtApp {
                 ui.separator();
                 ui.label("DRT");
                 let mut selected_drt = self.gpu.active_drt();
-                egui::ComboBox::from_id_salt("drt-selector")
-                    .selected_text(selected_drt.label())
-                    .show_ui(ui, |ui| {
-                        for drt in DrtKind::ALL {
-                            ui.selectable_value(&mut selected_drt, drt, drt.label());
-                        }
+                ui.horizontal_wrapped(|ui| {
+                    for drt in DrtKind::ALL {
+                        ui.selectable_value(&mut selected_drt, drt, drt.label());
+                    }
                     });
                 if selected_drt != self.gpu.active_drt() {
                     self.gpu.set_drt(selected_drt);
@@ -383,6 +391,177 @@ impl eframe::App for DrtApp {
                 if exposure_changed || overexposure_changed {
                     self.gpu.set_parameters(self.exposure_ev, self.overexposure);
                 }
+                if self.gpu.active_drt().uses_agx() {
+                    ui.separator();
+                    ui.label(RichText::new("AgX tone scale").strong());
+
+                    let mut agx_changed = ui
+                        .add(
+                            egui::Slider::new(
+                                &mut self.agx_parameters.shadow_ev,
+                                -20.0..=-1.0,
+                            )
+                            .step_by(0.25)
+                            .suffix(" EV")
+                            .text("Shadow reach"),
+                        )
+                        .on_hover_text("Scene stops below 18% gray mapped into the output range")
+                        .changed();
+                    agx_changed |= ui
+                        .add(
+                            egui::Slider::new(
+                                &mut self.agx_parameters.highlight_ev,
+                                1.0..=20.0,
+                            )
+                            .step_by(0.25)
+                            .suffix(" EV")
+                            .text("Highlight reach"),
+                        )
+                        .on_hover_text("Scene stops above 18% gray mapped into the output range")
+                        .changed();
+                    agx_changed |= ui
+                        .add(
+                            egui::Slider::new(
+                                &mut self.agx_parameters.output_pivot,
+                                0.1..=0.9,
+                            )
+                            .step_by(0.01)
+                            .text("Output middle gray"),
+                        )
+                        .on_hover_text("Display-encoded signal value assigned to scene-linear 18% gray")
+                        .changed();
+
+                    self.agx_parameters.constrain();
+                    let minimum_slope = self.agx_parameters.minimum_pivot_slope() + 1.0e-3;
+                    agx_changed |= ui
+                        .add(
+                            egui::Slider::new(
+                                &mut self.agx_parameters.pivot_slope,
+                                minimum_slope..=32.0,
+                            )
+                            .step_by(0.05)
+                            .text("Mid contrast"),
+                        )
+                        .on_hover_text("Slope at middle gray in normalized log2 space")
+                        .changed();
+                    agx_changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.agx_parameters.toe_power, 1.0..=8.0)
+                                .step_by(0.05)
+                                .text("Toe power"),
+                        )
+                        .on_hover_text("Higher values retain a straighter midrange, then enter black more sharply")
+                        .changed();
+                    agx_changed |= ui
+                        .add(
+                            egui::Slider::new(
+                                &mut self.agx_parameters.shoulder_power,
+                                1.0..=8.0,
+                            )
+                            .step_by(0.05)
+                            .text("Shoulder power"),
+                        )
+                        .on_hover_text("Higher values delay highlight compression and approach white more sharply")
+                        .changed();
+                    agx_changed |= ui
+                        .add(
+                            egui::Slider::new(
+                                &mut self.agx_parameters.gamut_compression,
+                                0.0..=0.8,
+                            )
+                            .step_by(0.01)
+                            .text("Gamut compression"),
+                        )
+                        .on_hover_text("Inset toward the neutral axis before the per-channel curve; 0.2 is the original value")
+                        .changed();
+
+                    self.agx_parameters.constrain();
+                    ui.label(
+                        RichText::new(format!(
+                            "{:.2} stops · input pivot {:.3} · slope min {:.3}",
+                            self.agx_parameters.highlight_ev - self.agx_parameters.shadow_ev,
+                            self.agx_parameters.input_pivot(),
+                            self.agx_parameters.minimum_pivot_slope(),
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                    if agx_changed {
+                        self.gpu.set_agx_parameters(self.agx_parameters);
+                    }
+                    if self.gpu.active_drt() == DrtKind::AgxHsv {
+                        ui.separator();
+                        ui.label(RichText::new("HSV hue repair").strong());
+                        let mut retention_changed = ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut self.agx_black_hue_retention,
+                                    0.0..=1.0,
+                                )
+                                    .step_by(0.01)
+                                    .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
+                                    .text("Black retention"),
+                            )
+                            .on_hover_text(
+                                "Original-hue retention applied where the AgX output value is zero",
+                            )
+                            .changed();
+                        retention_changed |= ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut self.agx_white_hue_retention,
+                                    0.0..=1.0,
+                                )
+                                .step_by(0.01)
+                                .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
+                                .text("White retention"),
+                            )
+                            .on_hover_text(
+                                "Original-hue retention applied where the AgX output value is one",
+                            )
+                            .changed();
+                        ui.label(
+                            RichText::new(
+                                "Retention is linearly interpolated by the clamped AgX HSV value",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                        if retention_changed {
+                            self.gpu.set_agx_hue_retention(
+                                self.agx_black_hue_retention,
+                                self.agx_white_hue_retention,
+                            );
+                        }
+                        ui.separator();
+                        ui.label(RichText::new("HSV gamut compression").strong());
+                        if ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut self.agx_black_gamut_onset,
+                                    0.0..=1.0,
+                                )
+                                .step_by(0.01)
+                                .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
+                                .text("Black onset"),
+                            )
+                            .on_hover_text(
+                                "Saturation soft-shoulder onset at V=0; the white onset at V=1 is fixed to 100%",
+                            )
+                            .changed()
+                        {
+                            self.gpu
+                                .set_agx_black_gamut_onset(self.agx_black_gamut_onset);
+                        }
+                        ui.label(
+                            RichText::new(
+                                "Onset interpolates to 100% by clamped AgX HSV value; V and hue are preserved",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                    }
+                }
                 if ui
                     .checkbox(&mut self.show_anomalies, "Show anomalies")
                     .on_hover_text(
@@ -411,8 +590,19 @@ impl eframe::App for DrtApp {
                 if ui.button("Reset parameters").clicked() {
                     self.exposure_ev = 0.0;
                     self.overexposure = 1.1;
+                    self.agx_parameters = AgxParameters::default();
+                    self.agx_black_hue_retention = 1.0;
+                    self.agx_white_hue_retention = 0.5;
+                    self.agx_black_gamut_onset = 0.95;
                     self.show_anomalies = false;
                     self.gpu.set_parameters(self.exposure_ev, self.overexposure);
+                    self.gpu.set_agx_parameters(self.agx_parameters);
+                    self.gpu.set_agx_hue_retention(
+                        self.agx_black_hue_retention,
+                        self.agx_white_hue_retention,
+                    );
+                    self.gpu
+                        .set_agx_black_gamut_onset(self.agx_black_gamut_onset);
                     self.gpu.set_show_anomalies(false);
                 }
                 ui.separator();

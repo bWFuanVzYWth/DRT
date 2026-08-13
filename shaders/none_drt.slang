@@ -1,7 +1,5 @@
-// AgX-S2O3 analytical display transform, ported from:
-// C:/WorkSpace/AgX/agx.glsl at commit 0796e1b4aa9df94152eff353bae131eae1a4c087.
-// Copyright (c) 2024 linlin. MIT licensed; see THIRD_PARTY_LICENSES/AgX-S2O3.txt.
-// Input: scene-linear ACES2065-1 (AP0). Output: display-encoded BT.709/sRGB.
+// Display reference with no tone mapping.
+// Input: scene-linear ACES2065-1 (AP0). Output: display-encoded sRGB.
 
 struct DrtParameters
 {
@@ -44,56 +42,15 @@ float3 acesAp0ToRec709(float3 ap0)
         dot(ap0, float3(-0.0153202001, -0.1529925618, 1.1683871996)));
 }
 
-static const float3 AGX_NEUTRAL_WEIGHTS = float3(
-    0.2120053547549465,
-    0.3921825078090138,
-    0.3958121374360396);
-
-float3 agxInset(float3 color)
+float3 encodeSrgb(float3 linearRgb)
 {
-    float neutral = dot(color, AGX_NEUTRAL_WEIGHTS);
-    return lerp(color, neutral.xxx, parameters.agxGamutCompression);
-}
-
-float3 agxOutset(float3 color)
-{
-    float neutral = dot(color, AGX_NEUTRAL_WEIGHTS);
-    return (color - parameters.agxGamutCompression * neutral.xxx)
-        / (1.0 - parameters.agxGamutCompression);
-}
-
-float agxCurveComponent(float value)
-{
-    bool toe = value <= parameters.agxInputPivot;
-    float power = toe ? parameters.agxToePower : parameters.agxShoulderPower;
-    float coefficient = toe ? parameters.agxToeA : parameters.agxShoulderA;
-    float distance = value - parameters.agxInputPivot;
-    return parameters.agxOutputPivot
-        + parameters.agxPivotSlope * distance
-            * pow(1.0 + coefficient * pow(abs(distance), power), -1.0 / power);
-}
-
-float3 agxCurve(float3 value)
-{
+    bool3 cutoff = linearRgb < 0.0031308;
+    float3 higher = 1.055 * pow(max(linearRgb, 0.0), 1.0 / 2.4) - 0.055;
+    float3 lower = linearRgb * 12.92;
     return float3(
-        agxCurveComponent(value.x),
-        agxCurveComponent(value.y),
-        agxCurveComponent(value.z));
-}
-
-float3 agxS2O3(float3 linearRec709)
-{
-    // The original AgX-S2O3 OCIO chain applies RangeTransform(minIn=0,
-    // minOut=0) before the inset. AP0-to-Rec.709 conversion can produce valid
-    // negative wide-gamut components, so enforce that input-domain contract
-    // here before taking log2.
-    float3 inset = agxInset(max(linearRec709, 0.0));
-    float3 normalizedLog = clamp(
-        (log2(inset) - parameters.agxMinimumLog2)
-            * parameters.agxInverseDynamicRange,
-        0.0,
-        1.0);
-    return agxOutset(agxCurve(normalizedLog));
+        cutoff.x ? lower.x : higher.x,
+        cutoff.y ? lower.y : higher.y,
+        cutoff.z ? lower.z : higher.z);
 }
 
 bool hasPositiveInfinity(float3 value)
@@ -142,8 +99,6 @@ float3 prepareOutput(float3 source, float3 mapped)
         if (any(mapped < 0.0)) return float3(0.0, 0.25, 1.0);
         if (any(mapped > 1.0)) return float3(1.0, 0.05, 0.0);
     }
-
-    // agxS2O3 already returns display-encoded BT.709; do not apply another OETF.
     return clamp(mapped, 0.0, 1.0);
 }
 
@@ -155,6 +110,6 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     if (pixel.x >= parameters.width || pixel.y >= parameters.height) return;
     float2 uv = (float2(pixel) + 0.5) / float2(parameters.width, parameters.height);
     float3 ap0 = inputTexture.SampleLevel(inputSampler, uv, 0.0).rgb * parameters.exposureMultiplier;
-    float3 mapped = agxS2O3(acesAp0ToRec709(ap0));
+    float3 mapped = encodeSrgb(acesAp0ToRec709(ap0));
     outputTexture.Store(pixel, float4(prepareOutput(ap0, mapped), 1.0));
 }

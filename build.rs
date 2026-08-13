@@ -8,8 +8,10 @@ const MIN_SLANG_YEAR: u32 = 2025;
 const MIN_SLANG_RELEASE: u32 = 13;
 
 fn main() {
+    println!("cargo:rerun-if-changed=shaders/none_drt.slang");
     println!("cargo:rerun-if-changed=shaders/oklab_drt.slang");
     println!("cargo:rerun-if-changed=shaders/agx_s2o3.slang");
+    println!("cargo:rerun-if-changed=shaders/agx_hsv.slang");
     println!("cargo:rerun-if-env-changed=SLANGC");
 
     let slangc = find_slangc();
@@ -17,8 +19,10 @@ fn main() {
 
     let output_directory = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
     for (source, output) in [
+        ("shaders/none_drt.slang", "none_drt.spv"),
         ("shaders/oklab_drt.slang", "oklab_drt.spv"),
         ("shaders/agx_s2o3.slang", "agx_s2o3.spv"),
+        ("shaders/agx_hsv.slang", "agx_hsv.spv"),
     ] {
         compile(&slangc, Path::new(source), &output_directory.join(output));
     }

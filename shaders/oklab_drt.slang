@@ -12,6 +12,22 @@ struct DrtParameters
     uint padding0;
     uint padding1;
     uint padding2;
+    float agxMinimumLog2;
+    float agxInverseDynamicRange;
+    float agxInputPivot;
+    float agxOutputPivot;
+    float agxPivotSlope;
+    float agxToePower;
+    float agxShoulderPower;
+    float agxGamutCompression;
+    float agxToeA;
+    float agxShoulderA;
+    float agxBlackHueRetention;
+    float agxWhiteHueRetention;
+    float agxBlackGamutOnset;
+    uint agxPadding0;
+    uint agxPadding1;
+    uint agxPadding2;
 };
 
 [[vk::binding(0, 0)]] Texture2D<float4> inputTexture;
