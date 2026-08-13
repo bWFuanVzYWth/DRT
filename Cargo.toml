@@ -2,7 +2,7 @@
 name = "drt"
 version = "0.1.0"
 edition = "2024"
-description = "Oklab DRT development bench built on wgpu 30 and Slang 2025.13+"
+description = "DRT development bench for Oklab and AgX-S2O3, built on wgpu 30 and Slang 2025.13+"
 publish = false
 
 [dependencies]

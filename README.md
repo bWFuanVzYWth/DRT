@@ -1,13 +1,13 @@
-# Oklab DRT Bench
+# DRT Bench
 
-单 Oklab DRT 开发测试环境。Oklab DRT 原先借助 `C:\WorkSpace\drt-bench` 协同设计和验证；本工程只保留需要长期维护的 Oklab 实现，不迁移其它 DRT。GPU 路径是：
+以 Oklab DRT 为主、AgX-S2O3 为参照的开发测试环境。Oklab DRT 原先借助 `C:\WorkSpace\drt-bench` 协同设计和验证；AgX-S2O3 从独立 MIT 项目 `C:\WorkSpace\AgX\agx.glsl` 移植，不包含 `drt-bench` 中的其它 DRT。GPU 路径是：
 
 ```text
 Slang 2025.13+ → SPIR-V 1.3 → wgpu 30 → Vulkan / Direct3D 12 / Metal
                                       ↘ egui / eframe 0.36 UI
 ```
 
-输入约定为 scene-linear ACES2065-1（AP0），输出为 SDR display-encoded sRGB。工程包含 Oklab 映射、肩部曲线、色域 cusp、Halley 修正和 saturation soft-min；不会引入 AgX、OpenDRT、Skibidi 或色彩立方体。
+输入约定为 scene-linear ACES2065-1（AP0），输出为 SDR display-encoded sRGB。Oklab 路径包含肩部曲线、色域 cusp、Halley 修正和 saturation soft-min；AgX-S2O3 路径按原始 OCIO 链路先将 AP0 转为线性 BT.709、钳制负分量，再执行 16.5-stop 解析 sigmoid。AgX-S2O3 的曲线结果已经是显示编码，直接写入 sRGB 呈现链路，不再叠加 OETF。不会引入 OpenDRT、Skibidi 或色彩立方体。
 
 ## 环境要求
 
@@ -33,9 +33,9 @@ cargo run -- frame.exr --show-anomalies
 - `F4`：打开包含测试图片的文件夹；
 - `F5`：重新执行 Slang → SPIR-V 编译；
 - `Esc`：退出；
-- 编辑 `shaders/oklab_drt.slang` 后会自动热重载；编译失败时保留上一条有效管线。
+- 编辑 `shaders/oklab_drt.slang` 或 `shaders/agx_s2o3.slang` 后会分别自动热重载；编译失败时保留对应 DRT 的上一条有效管线。
 
-UI 暴露参考工程 Oklab 路径的两个运行时参数：`-20..+20 EV` 曝光，以及 `0.5..2.0` 高光渐近值（默认 `1.1`）。没有输入图片时使用内置的 AP0 HDR 色条和 16-stop 曝光扫描图。
+UI 可在 `Oklab` 与 `AgX-S2O3` 间即时切换。两者共用 `-20..+20 EV` 曝光；`0.5..2.0` 高光渐近值（默认 `1.1`）仅用于 Oklab。没有输入图片时使用内置的 AP0 HDR 色条和 16-stop 曝光扫描图。
 
 顶部可在完整映射图和“映射图 + 色彩分布”两个界面间切换；分布视图支持 display-encoded sRGB 与 Oklab 坐标空间，并可拖动旋转。可视化直接用 `vertex_index` 将映射结果的每个像素变成一个点：不随机抽样、不降采样，标题会显示实际完整点数。点云使用带安全边界的正交投影，旋转不会让点越过透视近裁剪面。
 
@@ -61,4 +61,4 @@ cargo clippy --all-targets -- -D warnings
 
 ## 许可
 
-尚未选择开源协议。在协议确定前，本仓库不构成开源许可或再分发授权；`Cargo.toml` 设置了 `publish = false`，避免误发布到 crates.io。
+尚未选择项目整体的开源协议。在协议确定前，本仓库不构成整体开源许可或再分发授权；`Cargo.toml` 设置了 `publish = false`，避免误发布到 crates.io。AgX-S2O3 移植部分沿用上游 MIT License，完整版权与许可文本见 `THIRD_PARTY_LICENSES/AgX-S2O3.txt`。

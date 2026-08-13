@@ -12,7 +12,7 @@ use eframe::egui::{self, Color32, RichText, Vec2};
 
 use crate::distribution::{ColorSpace, DEFAULT_PITCH, DEFAULT_YAW, DistributionRenderer};
 use crate::file_browser::{FolderBrowser, Thumbnail, ThumbnailLoader};
-use crate::gpu::DrtGpu;
+use crate::gpu::{DrtGpu, DrtKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkspaceView {
@@ -41,14 +41,14 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 760.0])
             .with_min_inner_size([800.0, 520.0])
-            .with_title("Oklab DRT Bench"),
+            .with_title("DRT Bench"),
         renderer: eframe::Renderer::Wgpu,
         centered: true,
         ..Default::default()
     };
 
     eframe::run_native(
-        "Oklab DRT Bench",
+        "DRT Bench",
         native_options,
         Box::new(move |context| {
             Ok(Box::new(DrtApp::new(
@@ -70,8 +70,8 @@ struct DrtApp {
     image_name: String,
     status: String,
     status_error: bool,
-    shader_path: PathBuf,
-    shader_modified: Option<std::time::SystemTime>,
+    shader_paths: [PathBuf; 2],
+    shader_modified: [Option<std::time::SystemTime>; 2],
     last_shader_check: std::time::Instant,
     workspace_view: WorkspaceView,
     color_space: ColorSpace,
@@ -100,9 +100,12 @@ impl DrtApp {
             .wgpu_render_state
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("eframe did not create a wgpu render state"))?;
-        let shader_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("shaders")
-            .join("oklab_drt.slang");
+        let shader_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders");
+        let shader_paths = [
+            shader_directory.join(DrtKind::Oklab.shader_file()),
+            shader_directory.join(DrtKind::AgxS2O3.shader_file()),
+        ];
+        let shader_modified = shader_paths.each_ref().map(|path| modified_time(path));
         let image = match initial_image {
             Some(path) => image_io::load(path)?,
             None => image_io::test_pattern(1280, 720),
@@ -129,12 +132,12 @@ impl DrtApp {
             show_anomalies: initial_show_anomalies,
             image_name,
             status: folder_browser.as_ref().map_or_else(
-                || "Oklab DRT ready".to_owned(),
+                || "DRT bench ready".to_owned(),
                 |browser| format!("Folder opened · {} images", browser.entries.len()),
             ),
             status_error: false,
-            shader_modified: modified_time(&shader_path),
-            shader_path,
+            shader_paths,
+            shader_modified,
             last_shader_check: std::time::Instant::now(),
             workspace_view: initial_view,
             color_space: ColorSpace::Srgb,
@@ -235,13 +238,17 @@ impl DrtApp {
         }
     }
 
-    fn reload_shader(&mut self) {
-        let result = self.gpu.reload_shader(&self.shader_path);
+    fn reload_shader(&mut self, drt: DrtKind) {
+        let shader_path = self.shader_paths[drt.index()].clone();
+        let result = self.gpu.reload_shader(drt, &shader_path);
         // A failed edit is retried only after the file changes again.
-        self.shader_modified = modified_time(&self.shader_path);
+        self.shader_modified[drt.index()] = modified_time(&shader_path);
         match result {
             Ok(()) => {
-                self.set_status("Slang to SPIR-V hot reload succeeded".to_owned(), false);
+                self.set_status(
+                    format!("{} Slang to SPIR-V hot reload succeeded", drt.label()),
+                    false,
+                );
             }
             Err(error) => self.set_status(
                 format!("Shader compilation failed; keeping the last valid pipeline: {error:#}"),
@@ -256,9 +263,11 @@ impl DrtApp {
             return;
         }
         self.last_shader_check = std::time::Instant::now();
-        let current = modified_time(&self.shader_path);
-        if current.is_some() && current != self.shader_modified {
-            self.reload_shader();
+        for drt in DrtKind::ALL {
+            let current = modified_time(&self.shader_paths[drt.index()]);
+            if current.is_some() && current != self.shader_modified[drt.index()] {
+                self.reload_shader(drt);
+            }
         }
         context.request_repaint_after(std::time::Duration::from_millis(400));
     }
@@ -300,10 +309,10 @@ impl eframe::App for DrtApp {
                 });
                 ui.menu_button("Shader", |ui| {
                     if ui.button("Recompile  F5").clicked() {
-                        self.reload_shader();
+                        self.reload_shader(self.gpu.active_drt());
                         ui.close();
                     }
-                    ui.label("Auto-reloads after shaders/oklab_drt.slang changes");
+                    ui.label("Auto-reloads both DRT shader files");
                 });
                 ui.separator();
                 ui.selectable_value(&mut self.workspace_view, WorkspaceView::Image, "Image");
@@ -325,9 +334,23 @@ impl eframe::App for DrtApp {
             .default_size(292.0)
             .resizable(false)
             .show(ui, |ui| {
-                ui.heading("Oklab DRT");
+                ui.heading("Display Rendering Transform");
                 ui.label("Input: scene-linear ACES2065-1 / AP0");
                 ui.label("Output: SDR sRGB");
+                ui.separator();
+                ui.label("DRT");
+                let mut selected_drt = self.gpu.active_drt();
+                egui::ComboBox::from_id_salt("drt-selector")
+                    .selected_text(selected_drt.label())
+                    .show_ui(ui, |ui| {
+                        for drt in DrtKind::ALL {
+                            ui.selectable_value(&mut selected_drt, drt, drt.label());
+                        }
+                    });
+                if selected_drt != self.gpu.active_drt() {
+                    self.gpu.set_drt(selected_drt);
+                    self.set_status(format!("Switched to {}", selected_drt.label()), false);
+                }
                 if self.workspace_view == WorkspaceView::Analysis {
                     ui.separator();
                     ui.label("Distribution space");
@@ -350,10 +373,13 @@ impl eframe::App for DrtApp {
                             .suffix(" EV"),
                     )
                     .changed();
-                ui.label("Highlight asymptote");
-                let overexposure_changed = ui
-                    .add(egui::Slider::new(&mut self.overexposure, 0.5..=2.0).step_by(0.05))
-                    .changed();
+                let overexposure_changed = if self.gpu.active_drt() == DrtKind::Oklab {
+                    ui.label("Highlight asymptote");
+                    ui.add(egui::Slider::new(&mut self.overexposure, 0.5..=2.0).step_by(0.05))
+                        .changed()
+                } else {
+                    false
+                };
                 if exposure_changed || overexposure_changed {
                     self.gpu.set_parameters(self.exposure_ev, self.overexposure);
                 }
@@ -488,6 +514,8 @@ impl eframe::App for DrtApp {
                 ui.separator();
                 ui.label(format!("Backend: {:?}", self.gpu.backend()));
                 ui.separator();
+                ui.label(format!("DRT: {}", self.gpu.active_drt().label()));
+                ui.separator();
                 ui.label(format!(
                     "Exposure multiplier: {:.3}",
                     2.0_f32.powf(self.exposure_ev)
@@ -586,7 +614,7 @@ impl eframe::App for DrtApp {
             self.open_folder(&context);
         }
         if reload {
-            self.reload_shader();
+            self.reload_shader(self.gpu.active_drt());
         }
         if close {
             context.send_viewport_cmd(egui::ViewportCommand::Close);

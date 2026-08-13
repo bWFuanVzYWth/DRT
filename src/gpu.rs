@@ -11,7 +11,44 @@ use wgpu::util::DeviceExt;
 
 use crate::{distribution::DistributionRenderer, image_io::LinearImage};
 
-const BUILT_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/oklab_drt.spv"));
+const BUILT_OKLAB_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/oklab_drt.spv"));
+const BUILT_AGX_S2O3_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/agx_s2o3.spv"));
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrtKind {
+    Oklab,
+    AgxS2O3,
+}
+
+impl DrtKind {
+    pub const ALL: [Self; 2] = [Self::Oklab, Self::AgxS2O3];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Oklab => "Oklab",
+            Self::AgxS2O3 => "AgX-S2O3",
+        }
+    }
+
+    pub fn shader_file(self) -> &'static str {
+        match self {
+            Self::Oklab => "oklab_drt.slang",
+            Self::AgxS2O3 => "agx_s2o3.slang",
+        }
+    }
+
+    pub fn index(self) -> usize {
+        match self {
+            Self::Oklab => 0,
+            Self::AgxS2O3 => 1,
+        }
+    }
+}
+
+struct DrtPipelines {
+    oklab: wgpu::ComputePipeline,
+    agx_s2o3: wgpu::ComputePipeline,
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -38,7 +75,8 @@ pub struct DrtGpu {
     render_state: egui_wgpu::RenderState,
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
-    pipeline: wgpu::ComputePipeline,
+    pipelines: DrtPipelines,
+    active_drt: DrtKind,
     sampler: wgpu::Sampler,
     uniform: wgpu::Buffer,
     image: ImageResources,
@@ -54,13 +92,21 @@ impl DrtGpu {
         let info = render_state.adapter.get_info();
         let bind_group_layout = create_bind_group_layout(device);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Oklab DRT pipeline layout"),
+            label: Some("DRT pipeline layout"),
             bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
-        let pipeline = create_pipeline(device, &pipeline_layout, BUILT_SHADER)?;
+        let pipelines = DrtPipelines {
+            oklab: create_pipeline(device, &pipeline_layout, BUILT_OKLAB_SHADER, "Oklab DRT")?,
+            agx_s2o3: create_pipeline(
+                device,
+                &pipeline_layout,
+                BUILT_AGX_S2O3_SHADER,
+                "AgX-S2O3 DRT",
+            )?,
+        };
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Oklab DRT input sampler"),
+            label: Some("DRT input sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
@@ -76,7 +122,7 @@ impl DrtGpu {
             _padding: [0; 3],
         };
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Oklab DRT parameters"),
+            label: Some("DRT parameters"),
             contents: bytemuck::bytes_of(&parameters),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -99,7 +145,8 @@ impl DrtGpu {
             render_state,
             bind_group_layout,
             pipeline_layout,
-            pipeline,
+            pipelines,
+            active_drt: DrtKind::Oklab,
             sampler,
             uniform,
             image: image_resources,
@@ -159,16 +206,41 @@ impl DrtGpu {
         self.dispatch();
     }
 
-    pub fn reload_shader(&mut self, source: &Path) -> Result<()> {
-        let temporary = std::env::temp_dir().join(format!("drt-oklab-{}.spv", std::process::id()));
+    pub fn set_drt(&mut self, drt: DrtKind) {
+        if self.active_drt != drt {
+            self.active_drt = drt;
+            self.dispatch();
+        }
+    }
+
+    pub fn active_drt(&self) -> DrtKind {
+        self.active_drt
+    }
+
+    pub fn reload_shader(&mut self, drt: DrtKind, source: &Path) -> Result<()> {
+        let temporary = std::env::temp_dir().join(format!(
+            "drt-{}-{}.spv",
+            drt.shader_file().trim_end_matches(".slang"),
+            std::process::id()
+        ));
         compile_slang(source, &temporary)?;
         let bytes = std::fs::read(&temporary)
             .with_context(|| format!("cannot read {}", temporary.display()))?;
         let _ = std::fs::remove_file(&temporary);
 
-        let next = create_pipeline(&self.render_state.device, &self.pipeline_layout, &bytes)?;
-        self.pipeline = next;
-        self.dispatch();
+        let next = create_pipeline(
+            &self.render_state.device,
+            &self.pipeline_layout,
+            &bytes,
+            drt.label(),
+        )?;
+        match drt {
+            DrtKind::Oklab => self.pipelines.oklab = next,
+            DrtKind::AgxS2O3 => self.pipelines.agx_s2o3 = next,
+        }
+        if self.active_drt == drt {
+            self.dispatch();
+        }
         Ok(())
     }
 
@@ -193,14 +265,18 @@ impl DrtGpu {
             self.render_state
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Oklab DRT encoder"),
+                    label: Some("DRT encoder"),
                 });
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Oklab DRT pass"),
+                label: Some("DRT pass"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.pipeline);
+            let pipeline = match self.active_drt {
+                DrtKind::Oklab => &self.pipelines.oklab,
+                DrtKind::AgxS2O3 => &self.pipelines.agx_s2o3,
+            };
+            pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &self.image.bind_group, &[]);
             pass.dispatch_workgroups(
                 self.image.width.div_ceil(8),
@@ -214,7 +290,7 @@ impl DrtGpu {
 
 fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Oklab DRT bindings"),
+        label: Some("DRT bindings"),
         entries: &[
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
@@ -262,14 +338,15 @@ fn create_pipeline(
     device: &wgpu::Device,
     pipeline_layout: &wgpu::PipelineLayout,
     spirv: &[u8],
+    label: &str,
 ) -> Result<wgpu::ComputePipeline> {
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Oklab DRT SPIR-V"),
+        label: Some(label),
         source: wgpu::util::make_spirv(spirv),
     });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Oklab DRT pipeline"),
+        label: Some(label),
         layout: Some(pipeline_layout),
         module: &module,
         entry_point: Some("main"),
@@ -300,7 +377,7 @@ fn create_image_resources(
         depth_or_array_layers: 1,
     };
     let input = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("Oklab DRT AP0 input"),
+        label: Some("DRT AP0 input"),
         size: extent,
         mip_level_count: 1,
         sample_count: 1,
@@ -326,7 +403,7 @@ fn create_image_resources(
         extent,
     );
     let output = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("Oklab DRT sRGB output"),
+        label: Some("DRT sRGB output"),
         size: extent,
         mip_level_count: 1,
         sample_count: 1,
@@ -349,7 +426,7 @@ fn create_image_resources(
         ..Default::default()
     });
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Oklab DRT bind group"),
+        label: Some("DRT bind group"),
         layout,
         entries: &[
             wgpu::BindGroupEntry {
