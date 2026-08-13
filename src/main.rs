@@ -1,12 +1,17 @@
 mod distribution;
+mod file_browser;
 mod gpu;
 mod image_io;
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::mpsc::{self, Receiver, TryRecvError},
+};
 
 use eframe::egui::{self, Color32, RichText, Vec2};
 
 use crate::distribution::{ColorSpace, DistributionRenderer};
+use crate::file_browser::{FolderBrowser, Thumbnail, ThumbnailLoader};
 use crate::gpu::DrtGpu;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,10 +22,14 @@ enum WorkspaceView {
 
 fn main() -> eframe::Result {
     let mut initial_image = None;
+    let mut initial_folder = None;
     let mut initial_view = WorkspaceView::Image;
-    for argument in std::env::args_os().skip(1) {
+    let mut arguments = std::env::args_os().skip(1);
+    while let Some(argument) = arguments.next() {
         if argument == "--analysis" {
             initial_view = WorkspaceView::Analysis;
+        } else if argument == "--folder" {
+            initial_folder = arguments.next().map(PathBuf::from);
         } else if initial_image.is_none() {
             initial_image = Some(PathBuf::from(argument));
         }
@@ -42,6 +51,7 @@ fn main() -> eframe::Result {
             Ok(Box::new(DrtApp::new(
                 context,
                 initial_image.as_deref(),
+                initial_folder.as_deref(),
                 initial_view,
             )?))
         }),
@@ -62,12 +72,22 @@ struct DrtApp {
     color_space: ColorSpace,
     distribution_yaw: f32,
     distribution_pitch: f32,
+    image_path: Option<PathBuf>,
+    folder_browser: Option<FolderBrowser>,
+    thumbnail_loader: ThumbnailLoader,
+    pending_image: Option<PendingImage>,
+}
+
+struct PendingImage {
+    path: PathBuf,
+    receiver: Receiver<Result<image_io::LinearImage, String>>,
 }
 
 impl DrtApp {
     fn new(
         context: &eframe::CreationContext<'_>,
         initial_image: Option<&Path>,
+        initial_folder: Option<&Path>,
         initial_view: WorkspaceView,
     ) -> anyhow::Result<Self> {
         let render_state = context
@@ -87,12 +107,23 @@ impl DrtApp {
         );
         let gpu = DrtGpu::new(render_state, image)?;
 
+        let folder_browser = initial_folder
+            .map(|path| FolderBrowser::scan(path.to_path_buf()))
+            .transpose()?;
+        let mut thumbnail_loader = ThumbnailLoader::default();
+        if let Some(browser) = &folder_browser {
+            thumbnail_loader.start(browser.paths(), context.egui_ctx.clone());
+        }
+
         Ok(Self {
             gpu,
             exposure_ev: 0.0,
             overexposure: 1.1,
             image_name,
-            status: "Oklab DRT ready".to_owned(),
+            status: folder_browser.as_ref().map_or_else(
+                || "Oklab DRT ready".to_owned(),
+                |browser| format!("Folder opened · {} images", browser.entries.len()),
+            ),
             status_error: false,
             shader_modified: modified_time(&shader_path),
             shader_path,
@@ -101,10 +132,14 @@ impl DrtApp {
             color_space: ColorSpace::Srgb,
             distribution_yaw: 0.75,
             distribution_pitch: -0.35,
+            image_path: initial_image.map(Path::to_path_buf),
+            folder_browser,
+            thumbnail_loader,
+            pending_image: None,
         })
     }
 
-    fn open_image(&mut self) {
+    fn open_image(&mut self, context: &egui::Context) {
         let selected = rfd::FileDialog::new()
             .add_filter(
                 "HDR / EXR / common images",
@@ -112,13 +147,69 @@ impl DrtApp {
             )
             .pick_file();
         let Some(path) = selected else { return };
-        match image_io::load(&path).and_then(|image| self.gpu.set_image(image)) {
+        self.begin_image_load(path, context);
+    }
+
+    fn open_folder(&mut self, context: &egui::Context) {
+        let selected = rfd::FileDialog::new().pick_folder();
+        let Some(path) = selected else { return };
+        match FolderBrowser::scan(path) {
+            Ok(browser) => {
+                let count = browser.entries.len();
+                self.thumbnail_loader
+                    .start(browser.paths(), context.clone());
+                self.folder_browser = Some(browser);
+                self.set_status(format!("Folder opened · {count} images"), false);
+            }
+            Err(error) => self.set_status(format!("Folder opening failed: {error:#}"), true),
+        }
+    }
+
+    fn begin_image_load(&mut self, path: PathBuf, context: &egui::Context) {
+        if self
+            .pending_image
+            .as_ref()
+            .is_some_and(|pending| pending.path == path)
+            || (self.pending_image.is_none() && self.image_path.as_ref() == Some(&path))
+        {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let worker_path = path.clone();
+        let repaint = context.clone();
+        std::thread::spawn(move || {
+            let result = image_io::load(&worker_path).map_err(|error| format!("{error:#}"));
+            let _ = sender.send(result);
+            repaint.request_repaint();
+        });
+        self.set_status(format!("Loading {}…", path.display()), false);
+        self.pending_image = Some(PendingImage { path, receiver });
+    }
+
+    fn poll_image_load(&mut self) {
+        let result = match self
+            .pending_image
+            .as_ref()
+            .map(|pending| pending.receiver.try_recv())
+        {
+            Some(Ok(result)) => Some(result),
+            Some(Err(TryRecvError::Disconnected)) => Some(Err("loader stopped".to_owned())),
+            Some(Err(TryRecvError::Empty)) | None => None,
+        };
+        let Some(result) = result else { return };
+        let pending = self.pending_image.take().expect("pending image exists");
+        match result.and_then(|image| {
+            self.gpu
+                .set_image(image)
+                .map_err(|error| format!("{error:#}"))
+        }) {
             Ok(()) => {
-                self.image_name = path.file_name().map_or_else(
-                    || path.display().to_string(),
+                self.image_name = pending.path.file_name().map_or_else(
+                    || pending.path.display().to_string(),
                     |name| name.to_string_lossy().into(),
                 );
-                self.set_status(format!("Loaded {}", path.display()), false);
+                self.image_path = Some(pending.path.clone());
+                self.set_status(format!("Loaded {}", self.image_name), false);
             }
             Err(error) => self.set_status(format!("Image loading failed: {error:#}"), true),
         }
@@ -128,6 +219,8 @@ impl DrtApp {
         match self.gpu.set_image(image_io::test_pattern(1280, 720)) {
             Ok(()) => {
                 self.image_name = "Built-in AP0 HDR test pattern".to_owned();
+                self.image_path = None;
+                self.pending_image = None;
                 self.set_status("Built-in test pattern restored".to_owned(), false);
             }
             Err(error) => self.set_status(format!("Test-pattern creation failed: {error:#}"), true),
@@ -171,13 +264,21 @@ impl DrtApp {
 impl eframe::App for DrtApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_shader(ui.ctx());
+        self.poll_image_load();
+        if let Some(browser) = &mut self.folder_browser {
+            self.thumbnail_loader.poll(ui.ctx(), browser);
+        }
         let context = ui.ctx().clone();
 
         egui::Panel::top("menu").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Open image…  F3").clicked() {
-                        self.open_image();
+                        self.open_image(&context);
+                        ui.close();
+                    }
+                    if ui.button("Open folder…  F4").clicked() {
+                        self.open_folder(&context);
                         ui.close();
                     }
                     if ui.button("Built-in test pattern").clicked() {
@@ -213,7 +314,7 @@ impl eframe::App for DrtApp {
         });
 
         egui::Panel::left("controls")
-            .default_size(280.0)
+            .default_size(292.0)
             .resizable(false)
             .show(ui, |ui| {
                 ui.heading("Oklab DRT");
@@ -259,15 +360,84 @@ impl eframe::App for DrtApp {
                 ui.label(format!("{} × {}", self.gpu.width(), self.gpu.height()));
                 ui.horizontal(|ui| {
                     if ui.button("Open…").clicked() {
-                        self.open_image();
+                        self.open_image(&context);
+                    }
+                    if ui.button("Folder…").clicked() {
+                        self.open_folder(&context);
                     }
                     if ui.button("Test pattern").clicked() {
                         self.load_test_pattern();
                     }
                 });
+
+                let mut selected_path = None;
+                if let Some(browser) = &mut self.folder_browser {
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("Folder");
+                        ui.label(
+                            RichText::new(
+                                browser
+                                    .root
+                                    .file_name()
+                                    .unwrap_or(browser.root.as_os_str())
+                                    .to_string_lossy(),
+                            )
+                            .small()
+                            .weak(),
+                        )
+                        .on_hover_text(browser.root.display().to_string());
+                    });
+                    ui.label(
+                        RichText::new(format!("{} images", browser.entries.len()))
+                            .small()
+                            .weak(),
+                    );
+                    egui::ScrollArea::vertical()
+                        .id_salt("folder-image-list")
+                        .auto_shrink([false, false])
+                        .max_height((ui.available_height() - 90.0).max(100.0))
+                        .show(ui, |ui| {
+                            for entry in &browser.entries {
+                                let selected = self.image_path.as_ref() == Some(&entry.path)
+                                    || self
+                                        .pending_image
+                                        .as_ref()
+                                        .is_some_and(|pending| pending.path == entry.path);
+                                let response = match &entry.thumbnail {
+                                    Thumbnail::Ready(texture) => ui.add(
+                                        egui::Button::image_and_text(
+                                            egui::Image::new(texture)
+                                                .fit_to_exact_size(Vec2::new(72.0, 48.0)),
+                                            &entry.name,
+                                        )
+                                        .selected(selected)
+                                        .min_size(Vec2::new(ui.available_width(), 54.0)),
+                                    ),
+                                    Thumbnail::Pending => ui.add_sized(
+                                        [ui.available_width(), 40.0],
+                                        egui::Button::new(format!("◌  {}", entry.name))
+                                            .selected(selected),
+                                    ),
+                                    Thumbnail::Failed => ui.add_sized(
+                                        [ui.available_width(), 40.0],
+                                        egui::Button::new(format!("◇  {}", entry.name))
+                                            .selected(selected),
+                                    ),
+                                };
+                                if response.clicked() {
+                                    selected_path = Some(entry.path.clone());
+                                }
+                                response.on_hover_text(entry.path.display().to_string());
+                            }
+                        });
+                }
+                if let Some(path) = selected_path {
+                    self.begin_image_load(path, &context);
+                }
                 ui.separator();
                 ui.label("Shortcuts");
-                ui.label("F3 open · F5 compile · Esc exit");
+                ui.label("F3 image · F4 folder · F5 compile · Esc exit");
                 ui.add_space(8.0);
                 let color = if self.status_error {
                     Color32::LIGHT_RED
@@ -369,10 +539,14 @@ impl eframe::App for DrtApp {
             });
 
         let open = context.input(|input| input.key_pressed(egui::Key::F3));
+        let open_folder = context.input(|input| input.key_pressed(egui::Key::F4));
         let reload = context.input(|input| input.key_pressed(egui::Key::F5));
         let close = context.input(|input| input.key_pressed(egui::Key::Escape));
         if open {
-            self.open_image();
+            self.open_image(&context);
+        }
+        if open_folder {
+            self.open_folder(&context);
         }
         if reload {
             self.reload_shader();

@@ -23,11 +23,13 @@ Vulkan SDK 1.3.296+ 自带 Slang。构建脚本依次查找 `SLANGC`、`PATH` �
 cargo run
 cargo run -- frame.exr
 cargo run -- --analysis
+cargo run -- --folder C:\images
 ```
 
 也可在 UI 中打开 EXR、HDR、PNG、JPEG 或 WebP。浮点 EXR/HDR 被视为 scene-linear AP0；普通 SDR 图片按 sRGB 解码并从 Rec.709 转为 AP0。
 
 - `F3`：打开图片；
+- `F4`：打开包含测试图片的文件夹；
 - `F5`：重新执行 Slang → SPIR-V 编译；
 - `Esc`：退出；
 - 编辑 `shaders/oklab_drt.slang` 后会自动热重载；编译失败时保留上一条有效管线。
@@ -35,6 +37,8 @@ cargo run -- --analysis
 UI 暴露参考工程 Oklab 路径的两个运行时参数：`-20..+20 EV` 曝光，以及 `0.5..2.0` 高光渐近值（默认 `1.1`）。没有输入图片时使用内置的 AP0 HDR 色条和 16-stop 曝光扫描图。
 
 顶部可在完整映射图和“映射图 + 色彩分布”两个界面间切换；分布视图支持 display-encoded sRGB 与 Oklab 坐标空间，并可拖动旋转。可视化直接用 `vertex_index` 将映射结果的每个像素变成一个点：不随机抽样、不降采样，标题会显示实际完整点数。点云使用带安全边界的正交投影，旋转不会让点越过透视近裁剪面。
+
+打开文件夹后，左侧显示该目录中的 EXR、HDR、PNG、JPEG 和 WebP 文件。缩略图在后台依次生成；单击条目会在后台加载主图并立即切换 DRT 与色彩分布，列表本身不会因大图解码而失去响应。
 
 ## 验证
 
