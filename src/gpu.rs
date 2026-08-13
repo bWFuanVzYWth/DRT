@@ -20,6 +20,8 @@ struct Parameters {
     overexposure: f32,
     width: u32,
     height: u32,
+    show_anomalies: u32,
+    _padding: [u32; 3],
 }
 
 struct ImageResources {
@@ -70,6 +72,8 @@ impl DrtGpu {
             overexposure: 1.1,
             width: image.width,
             height: image.height,
+            show_anomalies: 0,
+            _padding: [0; 3],
         };
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Oklab DRT parameters"),
@@ -137,6 +141,16 @@ impl DrtGpu {
     pub fn set_parameters(&mut self, exposure_ev: f32, overexposure: f32) {
         self.parameters.exposure_multiplier = 2.0_f32.powf(exposure_ev);
         self.parameters.overexposure = overexposure;
+        self.render_state.queue.write_buffer(
+            &self.uniform,
+            0,
+            bytemuck::bytes_of(&self.parameters),
+        );
+        self.dispatch();
+    }
+
+    pub fn set_show_anomalies(&mut self, show: bool) {
+        self.parameters.show_anomalies = u32::from(show);
         self.render_state.queue.write_buffer(
             &self.uniform,
             0,

@@ -8,6 +8,10 @@ struct DrtParameters
     float overexposure;
     uint width;
     uint height;
+    uint showAnomalies;
+    uint padding0;
+    uint padding1;
+    uint padding2;
 };
 
 [[vk::binding(0, 0)]] Texture2D<float4> inputTexture;
@@ -237,6 +241,58 @@ float3 acesAp0ToRec709(float3 ap0)
         dot(ap0, float3(-0.0153202001, -0.1529925618, 1.1683871996)));
 }
 
+bool hasPositiveInfinity(float3 value)
+{
+    return (isinf(value.x) && value.x > 0.0)
+        || (isinf(value.y) && value.y > 0.0)
+        || (isinf(value.z) && value.z > 0.0);
+}
+
+bool hasNegativeInfinity(float3 value)
+{
+    return (isinf(value.x) && value.x < 0.0)
+        || (isinf(value.y) && value.y < 0.0)
+        || (isinf(value.z) && value.z < 0.0);
+}
+
+float3 anomalyColor(bool positiveInfinity, bool negativeInfinity)
+{
+    if (parameters.showAnomalies != 0)
+    {
+        if (positiveInfinity && negativeInfinity) return float3(1.0, 0.35, 0.0);
+        if (positiveInfinity) return float3(1.0, 1.0, 0.0);
+        return float3(0.0, 1.0, 1.0);
+    }
+    if (positiveInfinity && negativeInfinity) return float3(1.0, 0.0, 1.0);
+    if (positiveInfinity) return float3(1.0, 1.0, 1.0);
+    return float3(0.0, 0.0, 0.0);
+}
+
+float3 prepareOutput(float3 source, float3 mapped)
+{
+    // Magenta is reserved for undefined values in both modes.
+    if (any(isnan(source))) return float3(1.0, 0.0, 1.0);
+    bool positiveInfinity = hasPositiveInfinity(source);
+    bool negativeInfinity = hasNegativeInfinity(source);
+    if (positiveInfinity || negativeInfinity)
+        return anomalyColor(positiveInfinity, negativeInfinity);
+
+    if (any(isnan(mapped))) return float3(1.0, 0.0, 1.0);
+    positiveInfinity = hasPositiveInfinity(mapped);
+    negativeInfinity = hasNegativeInfinity(mapped);
+    if (positiveInfinity || negativeInfinity)
+        return anomalyColor(positiveInfinity, negativeInfinity);
+
+    if (parameters.showAnomalies != 0)
+    {
+        // Distinct diagnostic classes for finite range errors.
+        if (any(mapped < 0.0)) return float3(0.0, 0.25, 1.0);
+        if (any(mapped > 1.0)) return float3(1.0, 0.05, 0.0);
+    }
+
+    return clamp(encodeSrgb(clamp(mapped, 0.0, 1.0)), 0.0, 1.0);
+}
+
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
@@ -246,8 +302,5 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     float2 uv = (float2(pixel) + 0.5) / float2(parameters.width, parameters.height);
     float3 ap0 = inputTexture.SampleLevel(inputSampler, uv, 0.0).rgb * parameters.exposureMultiplier;
     float3 mapped = mapLinearRgb(acesAp0ToRec709(ap0), parameters.overexposure);
-    if (any(isnan(mapped)) || any(isinf(mapped)))
-        outputTexture.Store(pixel, float4(1.0, 0.0, 1.0, 1.0));
-    else
-        outputTexture.Store(pixel, float4(clamp(encodeSrgb(clamp(mapped, 0.0, 1.0)), 0.0, 1.0), 1.0));
+    outputTexture.Store(pixel, float4(prepareOutput(ap0, mapped), 1.0));
 }

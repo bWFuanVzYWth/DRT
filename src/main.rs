@@ -10,7 +10,7 @@ use std::{
 
 use eframe::egui::{self, Color32, RichText, Vec2};
 
-use crate::distribution::{ColorSpace, DistributionRenderer};
+use crate::distribution::{ColorSpace, DEFAULT_PITCH, DEFAULT_YAW, DistributionRenderer};
 use crate::file_browser::{FolderBrowser, Thumbnail, ThumbnailLoader};
 use crate::gpu::DrtGpu;
 
@@ -24,10 +24,13 @@ fn main() -> eframe::Result {
     let mut initial_image = None;
     let mut initial_folder = None;
     let mut initial_view = WorkspaceView::Image;
+    let mut initial_show_anomalies = false;
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
         if argument == "--analysis" {
             initial_view = WorkspaceView::Analysis;
+        } else if argument == "--show-anomalies" {
+            initial_show_anomalies = true;
         } else if argument == "--folder" {
             initial_folder = arguments.next().map(PathBuf::from);
         } else if initial_image.is_none() {
@@ -53,6 +56,7 @@ fn main() -> eframe::Result {
                 initial_image.as_deref(),
                 initial_folder.as_deref(),
                 initial_view,
+                initial_show_anomalies,
             )?))
         }),
     )
@@ -62,6 +66,7 @@ struct DrtApp {
     gpu: DrtGpu,
     exposure_ev: f32,
     overexposure: f32,
+    show_anomalies: bool,
     image_name: String,
     status: String,
     status_error: bool,
@@ -89,6 +94,7 @@ impl DrtApp {
         initial_image: Option<&Path>,
         initial_folder: Option<&Path>,
         initial_view: WorkspaceView,
+        initial_show_anomalies: bool,
     ) -> anyhow::Result<Self> {
         let render_state = context
             .wgpu_render_state
@@ -105,7 +111,8 @@ impl DrtApp {
             || "Built-in AP0 HDR test pattern".to_owned(),
             |name| name.to_string_lossy().into(),
         );
-        let gpu = DrtGpu::new(render_state, image)?;
+        let mut gpu = DrtGpu::new(render_state, image)?;
+        gpu.set_show_anomalies(initial_show_anomalies);
 
         let folder_browser = initial_folder
             .map(|path| FolderBrowser::scan(path.to_path_buf()))
@@ -119,6 +126,7 @@ impl DrtApp {
             gpu,
             exposure_ev: 0.0,
             overexposure: 1.1,
+            show_anomalies: initial_show_anomalies,
             image_name,
             status: folder_browser.as_ref().map_or_else(
                 || "Oklab DRT ready".to_owned(),
@@ -130,8 +138,8 @@ impl DrtApp {
             last_shader_check: std::time::Instant::now(),
             workspace_view: initial_view,
             color_space: ColorSpace::Srgb,
-            distribution_yaw: 0.75,
-            distribution_pitch: -0.35,
+            distribution_yaw: DEFAULT_YAW,
+            distribution_pitch: DEFAULT_PITCH,
             image_path: initial_image.map(Path::to_path_buf),
             folder_browser,
             thumbnail_loader,
@@ -328,7 +336,7 @@ impl eframe::App for DrtApp {
                         ui.selectable_value(&mut self.color_space, ColorSpace::Oklab, "Oklab");
                     });
                     ui.label(
-                        RichText::new("Every mapped pixel is rendered · drag to rotate")
+                        RichText::new("Every mapped pixel · left-drag rotate · right-click reset")
                             .small()
                             .weak(),
                     );
@@ -349,10 +357,37 @@ impl eframe::App for DrtApp {
                 if exposure_changed || overexposure_changed {
                     self.gpu.set_parameters(self.exposure_ev, self.overexposure);
                 }
+                if ui
+                    .checkbox(&mut self.show_anomalies, "Show anomalies")
+                    .on_hover_text(
+                        "NaN magenta · +Inf yellow · -Inf cyan · mixed ±Inf orange · negative blue · >1 red",
+                    )
+                    .changed()
+                {
+                    self.gpu.set_show_anomalies(self.show_anomalies);
+                }
+                if self.show_anomalies {
+                    egui::Grid::new("anomaly_legend")
+                        .num_columns(4)
+                        .spacing([5.0, 2.0])
+                        .show(ui, |ui| {
+                            anomaly_key(ui, Color32::MAGENTA, "NaN");
+                            anomaly_key(ui, Color32::YELLOW, "+Inf");
+                            ui.end_row();
+                            anomaly_key(ui, Color32::CYAN, "-Inf");
+                            anomaly_key(ui, Color32::from_rgb(255, 89, 0), "±Inf");
+                            ui.end_row();
+                            anomaly_key(ui, Color32::from_rgb(0, 64, 255), "< 0");
+                            anomaly_key(ui, Color32::from_rgb(255, 13, 0), "> 1");
+                            ui.end_row();
+                        });
+                }
                 if ui.button("Reset parameters").clicked() {
                     self.exposure_ev = 0.0;
                     self.overexposure = 1.1;
+                    self.show_anomalies = false;
                     self.gpu.set_parameters(self.exposure_ev, self.overexposure);
+                    self.gpu.set_show_anomalies(false);
                 }
                 ui.separator();
                 ui.label("Current image");
@@ -533,7 +568,9 @@ impl eframe::App for DrtApp {
                         self.color_space,
                         point_count,
                     );
-                    response.on_hover_text("Drag to rotate the complete pixel distribution");
+                    response.on_hover_text(
+                        "Left-drag to rotate · right-click to restore the default view",
+                    );
                     ui.advance_cursor_after_rect(available_rect);
                 }
             });
@@ -615,6 +652,11 @@ fn paint_centered_label(
         text_style.resolve(ui.style()),
         color,
     );
+}
+
+fn anomaly_key(ui: &mut egui::Ui, color: Color32, label: &str) {
+    ui.colored_label(color, "■");
+    ui.label(RichText::new(label).small());
 }
 
 fn format_point_count(count: u64) -> String {

@@ -11,6 +11,7 @@ struct DistributionParameters {
 struct VertexOutput {
     @builtin(position) position : vec4<f32>,
     @location(0) color : vec3<f32>,
+    @location(1) alpha : f32,
 }
 
 fn srgb_to_linear(encoded : vec3<f32>) -> vec3<f32> {
@@ -50,6 +51,14 @@ fn rotate(position : vec3<f32>) -> vec3<f32> {
     );
 }
 
+fn project(position : vec3<f32>) -> vec4<f32> {
+    let transformed = rotate(position);
+    let fit = select(0.62, 0.52, parameters.space == 0u);
+    // WebGPU clips depth to 0..w. Bias the rotated depth into that interval so
+    // the back half of the distribution is not discarded.
+    return vec4<f32>(transformed.xy * fit, 0.5 + transformed.z * 0.1, 1.0);
+}
+
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index : u32) -> VertexOutput {
     let pixel = vec2<u32>(vertex_index % parameters.image_size.x, vertex_index / parameters.image_size.x);
@@ -66,19 +75,81 @@ fn vs_main(@builtin(vertex_index) vertex_index : u32) -> VertexOutput {
     // Keep the complete point cloud inside clip space at every rotation. A
     // perspective divide can push points across or beyond a clip plane; this
     // orthographic fit only changes the viewing direction.
-    let transformed = rotate(distribution_position);
-    let fit = select(0.62, 0.52, parameters.space == 0u);
-    let center = transformed.xy * fit;
+    var output : VertexOutput;
+    output.position = project(distribution_position);
+    output.color = srgb_to_linear(encoded);
+    output.alpha = 0.24;
+    return output;
+}
+
+fn cube_edge(edge : u32) -> vec2<u32> {
+    switch edge {
+        case 0u: { return vec2<u32>(0u, 1u); }
+        case 1u: { return vec2<u32>(0u, 2u); }
+        case 2u: { return vec2<u32>(0u, 4u); }
+        case 3u: { return vec2<u32>(1u, 3u); }
+        case 4u: { return vec2<u32>(1u, 5u); }
+        case 5u: { return vec2<u32>(2u, 3u); }
+        case 6u: { return vec2<u32>(2u, 6u); }
+        case 7u: { return vec2<u32>(3u, 7u); }
+        case 8u: { return vec2<u32>(4u, 5u); }
+        case 9u: { return vec2<u32>(4u, 6u); }
+        case 10u: { return vec2<u32>(5u, 7u); }
+        default: { return vec2<u32>(6u, 7u); }
+    }
+}
+
+fn cube_corner(index : u32) -> vec3<f32> {
+    let encoded = vec3<f32>(
+        f32(index & 1u),
+        f32((index >> 1u) & 1u),
+        f32((index >> 2u) & 1u)
+    );
+    return encoded * 2.0 - 1.0;
+}
+
+@vertex
+fn vs_guide(@builtin(vertex_index) vertex_index : u32) -> VertexOutput {
+    var position : vec3<f32>;
+    var color = vec3<f32>(0.34, 0.38, 0.45);
+    var alpha = 0.42;
+    if (vertex_index < 24u) {
+        let edge = cube_edge(vertex_index / 2u);
+        let corner = select(edge.x, edge.y, (vertex_index & 1u) == 1u);
+        position = cube_corner(corner);
+    } else {
+        let axis = (vertex_index - 24u) / 2u;
+        let endpoint = (vertex_index & 1u) == 1u;
+        position = vec3<f32>(-1.0);
+        if (endpoint) {
+            if (axis == 0u) {
+                position.x = 1.0;
+                color = vec3<f32>(1.0, 0.025, 0.015);
+            } else if (axis == 1u) {
+                position.y = 1.0;
+                color = vec3<f32>(0.015, 1.0, 0.025);
+            } else {
+                position.z = 1.0;
+                color = vec3<f32>(0.015, 0.12, 1.0);
+            }
+        } else if (axis == 0u) {
+            color = vec3<f32>(1.0, 0.025, 0.015);
+        } else if (axis == 1u) {
+            color = vec3<f32>(0.015, 1.0, 0.025);
+        } else {
+            color = vec3<f32>(0.015, 0.12, 1.0);
+        }
+        alpha = 0.95;
+    }
 
     var output : VertexOutput;
-    // WebGPU clips depth to 0..w. Bias the rotated depth into that interval so
-    // the back half of the distribution is not discarded.
-    output.position = vec4<f32>(center, 0.5 + transformed.z * 0.1, 1.0);
-    output.color = srgb_to_linear(encoded);
+    output.position = project(position);
+    output.color = color;
+    output.alpha = alpha;
     return output;
 }
 
 @fragment
 fn fs_main(input : VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(input.color, 0.24);
+    return vec4<f32>(input.color, input.alpha);
 }

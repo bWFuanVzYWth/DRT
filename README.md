@@ -24,6 +24,7 @@ cargo run
 cargo run -- frame.exr
 cargo run -- --analysis
 cargo run -- --folder C:\images
+cargo run -- frame.exr --show-anomalies
 ```
 
 也可在 UI 中打开 EXR、HDR、PNG、JPEG 或 WebP。浮点 EXR/HDR 被视为 scene-linear AP0；普通 SDR 图片按 sRGB 解码并从 Rec.709 转为 AP0。
@@ -37,6 +38,10 @@ cargo run -- --folder C:\images
 UI 暴露参考工程 Oklab 路径的两个运行时参数：`-20..+20 EV` 曝光，以及 `0.5..2.0` 高光渐近值（默认 `1.1`）。没有输入图片时使用内置的 AP0 HDR 色条和 16-stop 曝光扫描图。
 
 顶部可在完整映射图和“映射图 + 色彩分布”两个界面间切换；分布视图支持 display-encoded sRGB 与 Oklab 坐标空间，并可拖动旋转。可视化直接用 `vertex_index` 将映射结果的每个像素变成一个点：不随机抽样、不降采样，标题会显示实际完整点数。点云使用带安全边界的正交投影，旋转不会让点越过透视近裁剪面。
+
+sRGB 分布带有单位立方体参照，并以红、绿、蓝高亮从黑点出发的 RGB 基向量；Oklab 暂不绘制参照。左键拖动旋转点云，右键单击恢复默认视角。
+
+“Show anomalies”默认关闭：有限输出钳制到显示范围，`+Inf` 清洗为白、`-Inf` 清洗为黑，NaN 或混合 `±Inf` 显示为洋红。启用后，NaN、`+Inf`、`-Inf`、混合 `±Inf`、有限负值和有限超范围值分别使用洋红、黄、青、橙、蓝、红显示；界面会同时显示图例。
 
 打开文件夹后，左侧显示该目录中的 EXR、HDR、PNG、JPEG 和 WebP 文件。缩略图在后台依次生成；单击条目会在后台加载主图并立即切换 DRT 与色彩分布，列表本身不会因大图解码而失去响应。
 

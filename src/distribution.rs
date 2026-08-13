@@ -2,6 +2,9 @@ use bytemuck::{Pod, Zeroable};
 use eframe::{egui, egui_wgpu};
 use wgpu::util::DeviceExt;
 
+pub const DEFAULT_YAW: f32 = 0.75;
+pub const DEFAULT_PITCH: f32 = -0.35;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColorSpace {
     Srgb,
@@ -77,12 +80,19 @@ impl DistributionRenderer {
         let response = ui.interact(
             rect,
             ui.id().with("color_distribution_canvas"),
-            egui::Sense::drag(),
+            egui::Sense::click_and_drag(),
         );
-        if response.dragged() {
+        if response.dragged_by(egui::PointerButton::Primary) {
             let motion = response.drag_motion();
             *yaw += motion.x * 0.008;
             *pitch = (*pitch - motion.y * 0.008).clamp(-1.45, 1.45);
+        }
+        if response.clicked_by(egui::PointerButton::Secondary)
+            || (response.hovered()
+                && ui.input(|input| input.pointer.button_clicked(egui::PointerButton::Secondary)))
+        {
+            *yaw = DEFAULT_YAW;
+            *pitch = DEFAULT_PITCH;
         }
 
         let painter = ui.painter().with_clip_rect(rect);
@@ -141,11 +151,16 @@ impl egui_wgpu::CallbackTrait for DistributionCallback {
         render_pass.set_pipeline(&resources.pipeline);
         render_pass.set_bind_group(0, &resources.bind_group, &[]);
         render_pass.draw(0..self.point_count, 0..1);
+        if self.color_space == ColorSpace::Srgb {
+            render_pass.set_pipeline(&resources.guide_pipeline);
+            render_pass.draw(0..30, 0..1);
+        }
     }
 }
 
 struct DistributionResources {
     pipeline: wgpu::RenderPipeline,
+    guide_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     uniform: wgpu::Buffer,
@@ -228,8 +243,37 @@ impl DistributionResources {
             multiview_mask: None,
             cache: None,
         });
+        let guide_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sRGB distribution reference pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_guide"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let parameters = DistributionParameters {
-            rotation: [0.75, -0.35, 0.0, 0.0],
+            rotation: [DEFAULT_YAW, DEFAULT_PITCH, 0.0, 0.0],
             image_size: [width, height],
             space: 0,
             _padding: 0.0,
@@ -242,6 +286,7 @@ impl DistributionResources {
         let bind_group = create_bind_group(device, &bind_group_layout, output_view, &uniform);
         Self {
             pipeline,
+            guide_pipeline,
             bind_group_layout,
             bind_group,
             uniform,
