@@ -2,7 +2,7 @@ struct DistributionParameters {
     rotation : vec4<f32>,
     image_size : vec2<u32>,
     space : u32,
-    _padding : f32,
+    target_is_srgb : u32,
 }
 
 @group(0) @binding(0) var output_image : texture_2d<f32>;
@@ -77,7 +77,7 @@ fn vs_main(@builtin(vertex_index) vertex_index : u32) -> VertexOutput {
     // orthographic fit only changes the viewing direction.
     var output : VertexOutput;
     output.position = project(distribution_position);
-    output.color = srgb_to_linear(encoded);
+    output.color = encoded;
     output.alpha = 0.24;
     return output;
 }
@@ -151,5 +151,9 @@ fn vs_guide(@builtin(vertex_index) vertex_index : u32) -> VertexOutput {
 
 @fragment
 fn fs_main(input : VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(input.color, input.alpha);
+    // egui prefers a gamma-space UNORM framebuffer, but some platforms expose
+    // only an sRGB framebuffer. In that fallback case the attachment performs
+    // the final OETF, so feed it linear values.
+    let color = select(input.color, srgb_to_linear(input.color), parameters.target_is_srgb != 0u);
+    return vec4<f32>(color, input.alpha);
 }

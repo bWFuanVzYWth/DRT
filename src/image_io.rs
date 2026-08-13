@@ -21,7 +21,7 @@ pub fn load(path: &Path) -> Result<LinearImage> {
 }
 
 fn dynamic_to_linear_ap0(image: DynamicImage) -> LinearImage {
-    let hdr = matches!(
+    let linear_ap0 = matches!(
         image,
         DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_)
     );
@@ -30,17 +30,17 @@ fn dynamic_to_linear_ap0(image: DynamicImage) -> LinearImage {
     let data = rgba
         .pixels()
         .flat_map(|pixel| {
-            let rgb = if hdr {
+            let ap0 = if linear_ap0 {
                 [pixel[0], pixel[1], pixel[2]]
             } else {
-                [
+                // Standard SDR files are interpreted as display-encoded sRGB.
+                let linear_rec709 = [
                     srgb_to_linear(pixel[0]),
                     srgb_to_linear(pixel[1]),
                     srgb_to_linear(pixel[2]),
-                ]
+                ];
+                rec709_to_ap0(linear_rec709)
             };
-            // Standard SDR files are interpreted as display-linear Rec.709 and converted to AP0.
-            let ap0 = rec709_to_ap0(rgb);
             [ap0[0], ap0[1], ap0[2], pixel[3]]
         })
         .collect();
@@ -112,6 +112,17 @@ mod tests {
     fn rec709_white_stays_ap0_white() {
         let white = rec709_to_ap0([1.0; 3]);
         assert!(white.into_iter().all(|value| (value - 1.0).abs() < 6.0e-5));
+    }
+
+    #[test]
+    fn floating_point_ap0_is_not_converted_again() {
+        let source = [2.0, -0.25, 0.5];
+        let image =
+            DynamicImage::ImageRgb32F(image::Rgb32FImage::from_pixel(1, 1, image::Rgb(source)));
+
+        let loaded = dynamic_to_linear_ap0(image);
+
+        assert_eq!(loaded.rgba, [source[0], source[1], source[2], 1.0]);
     }
 
     #[test]

@@ -333,7 +333,7 @@ fn create_image_resources(
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[wgpu::TextureFormat::Rgba8UnormSrgb],
+        view_formats: &[],
     });
     let input_view = input.create_view(&Default::default());
     let storage_view = output.create_view(&Default::default());
@@ -341,10 +341,10 @@ fn create_image_resources(
         usage: Some(wgpu::TextureUsages::TEXTURE_BINDING),
         ..Default::default()
     });
-    // The shader writes display-encoded values. Sampling the same bytes through
-    // an sRGB view decodes them before egui renders into its sRGB surface.
+    // The shader writes display-encoded sRGB values. egui-wgpu expects ordinary
+    // registered textures to return gamma-encoded samples, so this view must stay
+    // UNORM. egui handles the target framebuffer's transfer behavior itself.
     let display_view = output.create_view(&wgpu::TextureViewDescriptor {
-        format: Some(wgpu::TextureFormat::Rgba8UnormSrgb),
         usage: Some(wgpu::TextureUsages::TEXTURE_BINDING),
         ..Default::default()
     });

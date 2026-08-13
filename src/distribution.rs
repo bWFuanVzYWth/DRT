@@ -33,7 +33,7 @@ struct DistributionParameters {
     rotation: [f32; 4],
     image_size: [u32; 2],
     space: u32,
-    _padding: f32,
+    target_is_srgb: u32,
 }
 
 pub struct DistributionRenderer;
@@ -133,7 +133,7 @@ impl egui_wgpu::CallbackTrait for DistributionCallback {
             rotation: [self.yaw, self.pitch, 0.0, 0.0],
             image_size: [resources.width, resources.height],
             space: self.color_space.shader_value(),
-            _padding: 0.0,
+            target_is_srgb: u32::from(resources.target_is_srgb),
         };
         queue.write_buffer(&resources.uniform, 0, bytemuck::bytes_of(&parameters));
         Vec::new()
@@ -166,6 +166,7 @@ struct DistributionResources {
     uniform: wgpu::Buffer,
     width: u32,
     height: u32,
+    target_is_srgb: bool,
 }
 
 impl DistributionResources {
@@ -197,7 +198,7 @@ impl DistributionResources {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -276,7 +277,7 @@ impl DistributionResources {
             rotation: [DEFAULT_YAW, DEFAULT_PITCH, 0.0, 0.0],
             image_size: [width, height],
             space: 0,
-            _padding: 0.0,
+            target_is_srgb: u32::from(target_format.is_srgb()),
         };
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("color distribution parameters"),
@@ -292,6 +293,7 @@ impl DistributionResources {
             uniform,
             width,
             height,
+            target_is_srgb: target_format.is_srgb(),
         }
     }
 
