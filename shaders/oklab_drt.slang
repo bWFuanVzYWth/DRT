@@ -25,9 +25,9 @@ struct DrtParameters
     float agxBlackHueRetention;
     float agxWhiteHueRetention;
     float agxBlackGamutOnset;
-    uint agxPadding0;
-    uint agxPadding1;
-    uint agxPadding2;
+    float oklabWhiteHueCompression;
+    float oklabHueCompressionOnset;
+    uint padding3;
 };
 
 [[vk::binding(0, 0)]] Texture2D<float4> inputTexture;
@@ -37,6 +37,17 @@ struct DrtParameters
 
 static const float OKLAB_DRT_RGB_HEADROOM = 0.99999;
 static const float OKLAB_DRT_MIDDLE_GRAY = 0.18;
+static const float OKLAB_DRT_PI = 3.1415926535897932;
+static const float OKLAB_DRT_TWO_PI = 6.2831853071795865;
+// Oklab hue angles of the linear-sRGB gamut vertices. The secondary axes are
+// attractors; the primary axes remain fixed and separate adjacent basins.
+static const float OKLAB_DRT_YELLOW_HUE = 1.9158345171;
+static const float OKLAB_DRT_GREEN_HUE = 2.4870128323;
+static const float OKLAB_DRT_CYAN_HUE = 3.3993594221;
+static const float OKLAB_DRT_BLUE_HUE = 4.6085771567;
+static const float OKLAB_DRT_MAGENTA_HUE = 5.7310227859;
+static const float OKLAB_DRT_RED_HUE_WRAPPED = 6.7934128569;
+static const float OKLAB_DRT_YELLOW_HUE_WRAPPED = 8.1990198243;
 static const float3 OKLAB_DRT_RED_ROW = float3(4.0767416621, -3.3077115913, 0.2309699292);
 static const float3 OKLAB_DRT_GREEN_ROW = float3(-1.2684380046, 2.6097574011, -0.3413193965);
 static const float3 OKLAB_DRT_BLUE_ROW = float3(-0.0041960863, -0.7034186147, 1.7076147010);
@@ -97,6 +108,47 @@ float3 rootDirection(float2 hue)
         0.3963377774 * hue.x + 0.2158037573 * hue.y,
         -0.1055613458 * hue.x - 0.0638541728 * hue.y,
         -0.0894841775 * hue.x - 1.2914855480 * hue.y);
+}
+
+float warpHueTowardLower(float angle, float lower, float upper, float amount)
+{
+    float t = (angle - lower) / (upper - lower);
+    t -= amount * sin(OKLAB_DRT_PI * t) / OKLAB_DRT_PI;
+    return lerp(lower, upper, t);
+}
+
+float warpHueTowardUpper(float angle, float lower, float upper, float amount)
+{
+    float t = (angle - lower) / (upper - lower);
+    t += amount * sin(OKLAB_DRT_PI * t) / OKLAB_DRT_PI;
+    return lerp(lower, upper, t);
+}
+
+float2 compressHighlightHue(float2 hue, float outputLightness)
+{
+    float onset = parameters.oklabHueCompressionOnset;
+    float t = clamp((outputLightness - onset) / max(1.0 - onset, 1.0e-6), 0.0, 1.0);
+    float smoothT = t * t * (3.0 - 2.0 * t);
+    float amount = parameters.oklabWhiteHueCompression * smoothT;
+    if (amount <= 0.0) return hue;
+
+    float angle = atan2(hue.y, hue.x);
+    if (angle < OKLAB_DRT_YELLOW_HUE) angle += OKLAB_DRT_TWO_PI;
+
+    if (angle < OKLAB_DRT_GREEN_HUE)
+        angle = warpHueTowardLower(angle, OKLAB_DRT_YELLOW_HUE, OKLAB_DRT_GREEN_HUE, amount);
+    else if (angle < OKLAB_DRT_CYAN_HUE)
+        angle = warpHueTowardUpper(angle, OKLAB_DRT_GREEN_HUE, OKLAB_DRT_CYAN_HUE, amount);
+    else if (angle < OKLAB_DRT_BLUE_HUE)
+        angle = warpHueTowardLower(angle, OKLAB_DRT_CYAN_HUE, OKLAB_DRT_BLUE_HUE, amount);
+    else if (angle < OKLAB_DRT_MAGENTA_HUE)
+        angle = warpHueTowardUpper(angle, OKLAB_DRT_BLUE_HUE, OKLAB_DRT_MAGENTA_HUE, amount);
+    else if (angle < OKLAB_DRT_RED_HUE_WRAPPED)
+        angle = warpHueTowardLower(angle, OKLAB_DRT_MAGENTA_HUE, OKLAB_DRT_RED_HUE_WRAPPED, amount);
+    else
+        angle = warpHueTowardUpper(angle, OKLAB_DRT_RED_HUE_WRAPPED, OKLAB_DRT_YELLOW_HUE_WRAPPED, amount);
+
+    return float2(cos(angle), sin(angle));
 }
 
 float maxSaturation(float2 hue, float3 direction)
@@ -238,7 +290,7 @@ float3 mapLinearRgb(float3 color, float overexposure)
     if (inputChroma <= 1.0e-8)
         return OKLAB_DRT_RGB_HEADROOM * oklabToRgb(float3(outputLightness, 0.0, 0.0));
 
-    float2 hue = oklab.yz / inputChroma;
+    float2 hue = compressHighlightHue(oklab.yz / inputChroma, outputLightness);
     float3 direction = rootDirection(hue);
     float inputSaturation = inputChroma / oklab.x;
     float maximumSaturation = connectedSaturation(hue, maxSaturation(hue, direction));

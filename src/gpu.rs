@@ -67,6 +67,28 @@ struct DrtPipelines {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OklabHueParameters {
+    pub white_compression: f32,
+    pub onset: f32,
+}
+
+impl Default for OklabHueParameters {
+    fn default() -> Self {
+        Self {
+            white_compression: 0.8,
+            onset: 0.4,
+        }
+    }
+}
+
+impl OklabHueParameters {
+    pub fn constrain(&mut self) {
+        self.white_compression = self.white_compression.clamp(0.0, 1.0);
+        self.onset = self.onset.clamp(0.0, 0.99);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AgxParameters {
     pub shadow_ev: f32,
     pub highlight_ev: f32,
@@ -79,19 +101,36 @@ pub struct AgxParameters {
 
 impl Default for AgxParameters {
     fn default() -> Self {
-        Self {
-            shadow_ev: -10.0,
-            highlight_ev: 6.5,
-            output_pivot: 0.455,
-            pivot_slope: 3.0,
-            toe_power: 1.5,
-            shoulder_power: 3.0,
-            gamut_compression: 0.05,
-        }
+        Self::s2o3_reference()
     }
 }
 
 impl AgxParameters {
+    pub const fn s2o3_reference() -> Self {
+        Self {
+            shadow_ev: -10.0,
+            highlight_ev: 6.5,
+            output_pivot: 0.5,
+            pivot_slope: 2.0,
+            toe_power: 3.0,
+            shoulder_power: 3.25,
+            gamut_compression: 0.2,
+        }
+    }
+
+    pub const fn hsv_default() -> Self {
+        Self {
+            shadow_ev: -10.0,
+            highlight_ev: 6.5,
+            // IEC sRGB OETF(0.18): preserves scene-linear 18% gray on display.
+            output_pivot: 0.461_356_13,
+            pivot_slope: 2.0,
+            toe_power: 3.0,
+            shoulder_power: 3.25,
+            gamut_compression: 0.05,
+        }
+    }
+
     pub fn input_pivot(self) -> f32 {
         -self.shadow_ev / (self.highlight_ev - self.shadow_ev)
     }
@@ -137,14 +176,16 @@ struct Parameters {
     agx_black_hue_retention: f32,
     agx_white_hue_retention: f32,
     agx_black_gamut_onset: f32,
-    _agx_padding: [u32; 3],
+    oklab_white_hue_compression: f32,
+    oklab_hue_compression_onset: f32,
+    _padding3: u32,
 }
 
 impl Parameters {
     fn new(width: u32, height: u32) -> Self {
         let mut parameters = Self {
             exposure_multiplier: 1.0,
-            overexposure: 1.1,
+            overexposure: 1.0,
             width,
             height,
             show_anomalies: 0,
@@ -162,7 +203,9 @@ impl Parameters {
             agx_black_hue_retention: 1.0,
             agx_white_hue_retention: 0.5,
             agx_black_gamut_onset: 0.95,
-            _agx_padding: [0; 3],
+            oklab_white_hue_compression: 0.8,
+            oklab_hue_compression_onset: 0.4,
+            _padding3: 0,
         };
         parameters.set_agx(AgxParameters::default());
         parameters
@@ -362,6 +405,18 @@ impl DrtGpu {
 
     pub fn set_agx_black_gamut_onset(&mut self, onset: f32) {
         self.parameters.agx_black_gamut_onset = onset.clamp(0.0, 1.0);
+        self.render_state.queue.write_buffer(
+            &self.uniform,
+            0,
+            bytemuck::bytes_of(&self.parameters),
+        );
+        self.dispatch();
+    }
+
+    pub fn set_oklab_hue_parameters(&mut self, mut source: OklabHueParameters) {
+        source.constrain();
+        self.parameters.oklab_white_hue_compression = source.white_compression;
+        self.parameters.oklab_hue_compression_onset = source.onset;
         self.render_state.queue.write_buffer(
             &self.uniform,
             0,
@@ -714,7 +769,53 @@ fn find_slangc() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgxParameters, Parameters, curve_coefficient};
+    use super::{AgxParameters, OklabHueParameters, Parameters, curve_coefficient};
+
+    const PI: f32 = std::f32::consts::PI;
+    const TWO_PI: f32 = std::f32::consts::TAU;
+    const YELLOW: f32 = 1.915_834_5;
+    const GREEN: f32 = 2.487_012_9;
+    const CYAN: f32 = 3.399_359_5;
+    const BLUE: f32 = 4.608_577_3;
+    const MAGENTA: f32 = 5.731_023;
+    const RED_WRAPPED: f32 = 6.793_412_7;
+    const YELLOW_WRAPPED: f32 = 8.199_02;
+
+    fn warp_toward_lower(angle: f32, lower: f32, upper: f32, amount: f32) -> f32 {
+        let mut t = (angle - lower) / (upper - lower);
+        t -= amount * (PI * t).sin() / PI;
+        lower + (upper - lower) * t
+    }
+
+    fn warp_toward_upper(angle: f32, lower: f32, upper: f32, amount: f32) -> f32 {
+        let mut t = (angle - lower) / (upper - lower);
+        t += amount * (PI * t).sin() / PI;
+        lower + (upper - lower) * t
+    }
+
+    fn compress_oklab_hue(mut angle: f32, amount: f32) -> f32 {
+        if angle < YELLOW {
+            angle += TWO_PI;
+        }
+        if angle < GREEN {
+            warp_toward_lower(angle, YELLOW, GREEN, amount)
+        } else if angle < CYAN {
+            warp_toward_upper(angle, GREEN, CYAN, amount)
+        } else if angle < BLUE {
+            warp_toward_lower(angle, CYAN, BLUE, amount)
+        } else if angle < MAGENTA {
+            warp_toward_upper(angle, BLUE, MAGENTA, amount)
+        } else if angle < RED_WRAPPED {
+            warp_toward_lower(angle, MAGENTA, RED_WRAPPED, amount)
+        } else {
+            warp_toward_upper(angle, RED_WRAPPED, YELLOW_WRAPPED, amount)
+        }
+    }
+
+    fn highlight_hue_amount(lightness: f32, onset: f32, white_amount: f32) -> f32 {
+        let t = ((lightness - onset) / (1.0 - onset)).clamp(0.0, 1.0);
+        white_amount * t * t * (3.0 - 2.0 * t)
+    }
 
     fn curve_value(
         value: f32,
@@ -736,18 +837,86 @@ mod tests {
     }
 
     #[test]
-    fn default_agx_parameters_reproduce_the_tuned_constants() {
-        let source = AgxParameters::default();
+    fn s2o3_reference_parameters_reproduce_the_original_constants() {
+        let source = AgxParameters::s2o3_reference();
         let parameters = Parameters::new(1280, 720);
 
         assert!((source.input_pivot() - 0.606_060_6).abs() < 1.0e-7);
+        assert_eq!(source.output_pivot, 0.5);
+        assert_eq!(source.pivot_slope, 2.0);
+        assert_eq!(source.toe_power, 3.0);
+        assert_eq!(source.shoulder_power, 3.25);
+        assert_eq!(source.gamut_compression, 0.2);
         assert!((parameters.agx_minimum_log2 - -12.473_931).abs() < 2.0e-6);
         assert!((parameters.agx_inverse_dynamic_range - 1.0 / 16.5).abs() < 1.0e-7);
-        assert!((parameters.agx_toe_a - 14.810_842).abs() < 1.0e-4);
-        assert!((parameters.agx_shoulder_a - 150.434_33).abs() < 1.0e-3);
+        assert!((parameters.agx_toe_a - 59.507_874).abs() < 1.0e-4);
+        assert!((parameters.agx_shoulder_a - 69.862_79).abs() < 1.0e-3);
         assert_eq!(parameters.agx_black_hue_retention, 1.0);
         assert_eq!(parameters.agx_white_hue_retention, 0.5);
         assert_eq!(parameters.agx_black_gamut_onset, 0.95);
+    }
+
+    #[test]
+    fn agx_hsv_keeps_the_reference_curve_defaults_separate() {
+        let source = AgxParameters::hsv_default();
+        let mut parameters = Parameters::new(1280, 720);
+        parameters.set_agx(source);
+
+        assert!((source.output_pivot - 0.461_356_13).abs() < 1.0e-7);
+        assert_eq!(source.pivot_slope, 2.0);
+        assert_eq!(source.toe_power, 3.0);
+        assert_eq!(source.shoulder_power, 3.25);
+        assert_eq!(source.gamut_compression, 0.05);
+        assert!((parameters.agx_toe_a - 76.974_76).abs() < 1.0e-4);
+        assert!((parameters.agx_shoulder_a - 50.411_762).abs() < 1.0e-3);
+        assert_ne!(source, AgxParameters::s2o3_reference());
+    }
+
+    #[test]
+    fn default_oklab_hue_parameters_target_the_highlights() {
+        let source = OklabHueParameters::default();
+        let parameters = Parameters::new(1280, 720);
+
+        assert_eq!(source.white_compression, 0.8);
+        assert_eq!(source.onset, 0.4);
+        assert_eq!(parameters.overexposure, 1.0);
+        assert_eq!(parameters.oklab_white_hue_compression, 0.8);
+        assert_eq!(parameters.oklab_hue_compression_onset, 0.4);
+        assert_eq!(
+            highlight_hue_amount(0.4, source.onset, source.white_compression),
+            0.0
+        );
+        assert_eq!(
+            highlight_hue_amount(1.0, source.onset, source.white_compression),
+            0.8
+        );
+    }
+
+    #[test]
+    fn oklab_hue_compression_keeps_rgb_and_cmy_axes_fixed() {
+        for angle in [YELLOW, GREEN, CYAN, BLUE, MAGENTA, RED_WRAPPED] {
+            assert!((compress_oklab_hue(angle, 1.0) - angle).abs() < 2.0e-6);
+        }
+
+        let yellow_side = 0.5 * (YELLOW + GREEN);
+        let cyan_side = 0.5 * (GREEN + CYAN);
+        let magenta_side = 0.5 * (BLUE + MAGENTA);
+        assert!(compress_oklab_hue(yellow_side, 0.5) < yellow_side);
+        assert!(compress_oklab_hue(cyan_side, 0.5) > cyan_side);
+        assert!(compress_oklab_hue(magenta_side, 0.5) > magenta_side);
+    }
+
+    #[test]
+    fn oklab_hue_compression_does_not_fold_the_hue_circle() {
+        for amount in [0.0, 0.5, 1.0] {
+            let mut previous = compress_oklab_hue(YELLOW, amount);
+            for index in 1..=4096 {
+                let angle = YELLOW + TWO_PI * index as f32 / 4096.0;
+                let mapped = compress_oklab_hue(angle, amount);
+                assert!(mapped + 2.0e-6 >= previous);
+                previous = mapped;
+            }
+        }
     }
 
     #[test]

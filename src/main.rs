@@ -12,7 +12,7 @@ use eframe::egui::{self, Color32, RichText, Vec2};
 
 use crate::distribution::{ColorSpace, DEFAULT_PITCH, DEFAULT_YAW, DistributionRenderer};
 use crate::file_browser::{FolderBrowser, Thumbnail, ThumbnailLoader};
-use crate::gpu::{AgxParameters, DrtGpu, DrtKind};
+use crate::gpu::{AgxParameters, DrtGpu, DrtKind, OklabHueParameters};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkspaceView {
@@ -66,7 +66,9 @@ struct DrtApp {
     gpu: DrtGpu,
     exposure_ev: f32,
     overexposure: f32,
-    agx_parameters: AgxParameters,
+    oklab_hue_parameters: OklabHueParameters,
+    agx_s2o3_parameters: AgxParameters,
+    agx_hsv_parameters: AgxParameters,
     agx_black_hue_retention: f32,
     agx_white_hue_retention: f32,
     agx_black_gamut_onset: f32,
@@ -134,8 +136,10 @@ impl DrtApp {
         Ok(Self {
             gpu,
             exposure_ev: 0.0,
-            overexposure: 1.1,
-            agx_parameters: AgxParameters::default(),
+            overexposure: 1.0,
+            oklab_hue_parameters: OklabHueParameters::default(),
+            agx_s2o3_parameters: AgxParameters::s2o3_reference(),
+            agx_hsv_parameters: AgxParameters::hsv_default(),
             agx_black_hue_retention: 1.0,
             agx_white_hue_retention: 0.5,
             agx_black_gamut_onset: 0.95,
@@ -354,8 +358,16 @@ impl eframe::App for DrtApp {
                     for drt in DrtKind::ALL {
                         ui.selectable_value(&mut selected_drt, drt, drt.label());
                     }
-                    });
+                });
                 if selected_drt != self.gpu.active_drt() {
+                    let next_agx_parameters = match selected_drt {
+                        DrtKind::AgxS2O3 => Some(self.agx_s2o3_parameters),
+                        DrtKind::AgxHsv => Some(self.agx_hsv_parameters),
+                        DrtKind::None | DrtKind::Oklab => None,
+                    };
+                    if let Some(parameters) = next_agx_parameters {
+                        self.gpu.set_agx_parameters(parameters);
+                    }
                     self.gpu.set_drt(selected_drt);
                     self.set_status(format!("Switched to {}", selected_drt.label()), false);
                 }
@@ -391,14 +403,66 @@ impl eframe::App for DrtApp {
                 if exposure_changed || overexposure_changed {
                     self.gpu.set_parameters(self.exposure_ev, self.overexposure);
                 }
-                if self.gpu.active_drt().uses_agx() {
+                if self.gpu.active_drt() == DrtKind::Oklab {
                     ui.separator();
-                    ui.label(RichText::new("AgX tone scale").strong());
+                    ui.label(RichText::new("Oklab highlight hue compression").strong());
+                    let mut hue_changed = ui
+                        .add(
+                            egui::Slider::new(
+                                &mut self.oklab_hue_parameters.white_compression,
+                                0.0..=1.0,
+                            )
+                            .step_by(0.01)
+                            .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
+                            .text("White compression"),
+                        )
+                        .on_hover_text(
+                            "Maximum active attraction toward the yellow, cyan, and magenta Oklab hue axes",
+                        )
+                        .changed();
+                    hue_changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.oklab_hue_parameters.onset, 0.0..=0.95)
+                                .step_by(0.01)
+                                .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
+                                .text("Highlight onset"),
+                        )
+                        .on_hover_text(
+                            "Mapped Oklab lightness where the active hue compression starts",
+                        )
+                        .changed();
+                    self.oklab_hue_parameters.constrain();
+                    ui.label(
+                        RichText::new(
+                            "Compression rises smoothly with mapped lightness; RGB primary axes stay fixed",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                    if hue_changed {
+                        self.gpu
+                            .set_oklab_hue_parameters(self.oklab_hue_parameters);
+                    }
+                }
+                let active_drt = self.gpu.active_drt();
+                if active_drt.uses_agx() {
+                    let mut agx_parameters = match active_drt {
+                        DrtKind::AgxS2O3 => self.agx_s2o3_parameters,
+                        DrtKind::AgxHsv => self.agx_hsv_parameters,
+                        DrtKind::None | DrtKind::Oklab => unreachable!(),
+                    };
+                    ui.separator();
+                    let heading = match active_drt {
+                        DrtKind::AgxS2O3 => "AgX-S2O3 reference scale",
+                        DrtKind::AgxHsv => "AgX-HSV tone scale",
+                        DrtKind::None | DrtKind::Oklab => unreachable!(),
+                    };
+                    ui.label(RichText::new(heading).strong());
 
                     let mut agx_changed = ui
                         .add(
                             egui::Slider::new(
-                                &mut self.agx_parameters.shadow_ev,
+                                &mut agx_parameters.shadow_ev,
                                 -20.0..=-1.0,
                             )
                             .step_by(0.25)
@@ -410,7 +474,7 @@ impl eframe::App for DrtApp {
                     agx_changed |= ui
                         .add(
                             egui::Slider::new(
-                                &mut self.agx_parameters.highlight_ev,
+                                &mut agx_parameters.highlight_ev,
                                 1.0..=20.0,
                             )
                             .step_by(0.25)
@@ -422,7 +486,7 @@ impl eframe::App for DrtApp {
                     agx_changed |= ui
                         .add(
                             egui::Slider::new(
-                                &mut self.agx_parameters.output_pivot,
+                                &mut agx_parameters.output_pivot,
                                 0.1..=0.9,
                             )
                             .step_by(0.01)
@@ -431,12 +495,12 @@ impl eframe::App for DrtApp {
                         .on_hover_text("Display-encoded signal value assigned to scene-linear 18% gray")
                         .changed();
 
-                    self.agx_parameters.constrain();
-                    let minimum_slope = self.agx_parameters.minimum_pivot_slope() + 1.0e-3;
+                    agx_parameters.constrain();
+                    let minimum_slope = agx_parameters.minimum_pivot_slope() + 1.0e-3;
                     agx_changed |= ui
                         .add(
                             egui::Slider::new(
-                                &mut self.agx_parameters.pivot_slope,
+                                &mut agx_parameters.pivot_slope,
                                 minimum_slope..=32.0,
                             )
                             .step_by(0.05)
@@ -446,7 +510,7 @@ impl eframe::App for DrtApp {
                         .changed();
                     agx_changed |= ui
                         .add(
-                            egui::Slider::new(&mut self.agx_parameters.toe_power, 1.0..=8.0)
+                            egui::Slider::new(&mut agx_parameters.toe_power, 1.0..=8.0)
                                 .step_by(0.05)
                                 .text("Toe power"),
                         )
@@ -455,7 +519,7 @@ impl eframe::App for DrtApp {
                     agx_changed |= ui
                         .add(
                             egui::Slider::new(
-                                &mut self.agx_parameters.shoulder_power,
+                                &mut agx_parameters.shoulder_power,
                                 1.0..=8.0,
                             )
                             .step_by(0.05)
@@ -466,7 +530,7 @@ impl eframe::App for DrtApp {
                     agx_changed |= ui
                         .add(
                             egui::Slider::new(
-                                &mut self.agx_parameters.gamut_compression,
+                                &mut agx_parameters.gamut_compression,
                                 0.0..=0.8,
                             )
                             .step_by(0.01)
@@ -475,21 +539,26 @@ impl eframe::App for DrtApp {
                         .on_hover_text("Inset toward the neutral axis before the per-channel curve; 0.2 is the original value")
                         .changed();
 
-                    self.agx_parameters.constrain();
+                    agx_parameters.constrain();
                     ui.label(
                         RichText::new(format!(
                             "{:.2} stops · input pivot {:.3} · slope min {:.3}",
-                            self.agx_parameters.highlight_ev - self.agx_parameters.shadow_ev,
-                            self.agx_parameters.input_pivot(),
-                            self.agx_parameters.minimum_pivot_slope(),
+                            agx_parameters.highlight_ev - agx_parameters.shadow_ev,
+                            agx_parameters.input_pivot(),
+                            agx_parameters.minimum_pivot_slope(),
                         ))
                         .small()
                         .weak(),
                     );
-                    if agx_changed {
-                        self.gpu.set_agx_parameters(self.agx_parameters);
+                    match active_drt {
+                        DrtKind::AgxS2O3 => self.agx_s2o3_parameters = agx_parameters,
+                        DrtKind::AgxHsv => self.agx_hsv_parameters = agx_parameters,
+                        DrtKind::None | DrtKind::Oklab => unreachable!(),
                     }
-                    if self.gpu.active_drt() == DrtKind::AgxHsv {
+                    if agx_changed {
+                        self.gpu.set_agx_parameters(agx_parameters);
+                    }
+                    if active_drt == DrtKind::AgxHsv {
                         ui.separator();
                         ui.label(RichText::new("HSV hue repair").strong());
                         let mut retention_changed = ui
@@ -589,14 +658,25 @@ impl eframe::App for DrtApp {
                 }
                 if ui.button("Reset parameters").clicked() {
                     self.exposure_ev = 0.0;
-                    self.overexposure = 1.1;
-                    self.agx_parameters = AgxParameters::default();
+                    self.overexposure = 1.0;
+                    self.oklab_hue_parameters = OklabHueParameters::default();
+                    self.agx_s2o3_parameters = AgxParameters::s2o3_reference();
+                    self.agx_hsv_parameters = AgxParameters::hsv_default();
                     self.agx_black_hue_retention = 1.0;
                     self.agx_white_hue_retention = 0.5;
                     self.agx_black_gamut_onset = 0.95;
                     self.show_anomalies = false;
                     self.gpu.set_parameters(self.exposure_ev, self.overexposure);
-                    self.gpu.set_agx_parameters(self.agx_parameters);
+                    self.gpu
+                        .set_oklab_hue_parameters(self.oklab_hue_parameters);
+                    let active_agx_parameters = match self.gpu.active_drt() {
+                        DrtKind::AgxS2O3 => Some(self.agx_s2o3_parameters),
+                        DrtKind::AgxHsv => Some(self.agx_hsv_parameters),
+                        DrtKind::None | DrtKind::Oklab => None,
+                    };
+                    if let Some(parameters) = active_agx_parameters {
+                        self.gpu.set_agx_parameters(parameters);
+                    }
                     self.gpu.set_agx_hue_retention(
                         self.agx_black_hue_retention,
                         self.agx_white_hue_retention,

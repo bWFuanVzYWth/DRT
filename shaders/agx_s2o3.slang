@@ -26,9 +26,9 @@ struct DrtParameters
     float agxBlackHueRetention;
     float agxWhiteHueRetention;
     float agxBlackGamutOnset;
-    uint agxPadding0;
-    uint agxPadding1;
-    uint agxPadding2;
+    float oklabWhiteHueCompression;
+    float oklabHueCompressionOnset;
+    uint padding3;
 };
 
 [[vk::binding(0, 0)]] Texture2D<float4> inputTexture;
