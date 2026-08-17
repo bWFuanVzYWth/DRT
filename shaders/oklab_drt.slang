@@ -24,15 +24,15 @@ struct DrtParameters
     float agxShoulderA;
     float agxBlackHueRetention;
     float agxWhiteHueRetention;
-    float agxBlackGamutOnset;
     float oklabWhiteHueCompression;
     float oklabHueCompressionOnset;
-    uint padding3;
+    float agxMaximumLogCoordinate;
+    float agxOutputPeak;
 };
 
 [[vk::binding(0, 0)]] Texture2D<float4> inputTexture;
 [[vk::binding(1, 0)]] SamplerState inputSampler;
-[[vk::binding(2, 0)]] [vk::image_format("rgba8")] WTexture2D<float4> outputTexture;
+[[vk::binding(2, 0)]] [vk::image_format("rgba16f")] WTexture2D<float4> outputTexture;
 [[vk::binding(3, 0)]] ConstantBuffer<DrtParameters> parameters;
 
 static const float OKLAB_DRT_RGB_HEADROOM = 0.99999;

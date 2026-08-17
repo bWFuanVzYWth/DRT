@@ -1,5 +1,6 @@
-// AgX-S2O3 followed by an optional HSV hue repair.
-// Input: scene-linear ACES2065-1 (AP0). Output: display-encoded BT.709/sRGB.
+// Unified SDR/HDR AgX followed by an optional HSV hue repair.
+// Input: scene-linear ACES2065-1 (AP0).
+// Output: display-encoded extended sRGB (1.0 is SDR reference white).
 
 struct DrtParameters
 {
@@ -23,15 +24,15 @@ struct DrtParameters
     float agxShoulderA;
     float agxBlackHueRetention;
     float agxWhiteHueRetention;
-    float agxBlackGamutOnset;
     float oklabWhiteHueCompression;
     float oklabHueCompressionOnset;
-    uint padding3;
+    float agxMaximumLogCoordinate;
+    float agxOutputPeak;
 };
 
 [[vk::binding(0, 0)]] Texture2D<float4> inputTexture;
 [[vk::binding(1, 0)]] SamplerState inputSampler;
-[[vk::binding(2, 0)]] [vk::image_format("rgba8")] WTexture2D<float4> outputTexture;
+[[vk::binding(2, 0)]] [vk::image_format("rgba16f")] WTexture2D<float4> outputTexture;
 [[vk::binding(3, 0)]] ConstantBuffer<DrtParameters> parameters;
 
 static const float3 AGX_NEUTRAL_WEIGHTS = float3(
@@ -108,23 +109,19 @@ float3 agxCurve(float3 value)
         agxCurveComponent(value.z));
 }
 
-float3 agxS2O3(float3 linearRec709)
+float3 agxToneScale(float3 linearRec709)
 {
+    // TODO: Known issue: a strong per-channel shoulder can produce perceptual
+    // banding across high-to-low-saturation highlight transitions. The current
+    // 5.2 default is an accepted artistic compromise pending a color-trajectory
+    // model that is independent from the tone curve.
     float3 inset = agxInset(linearRec709);
     float3 normalizedLog = clamp(
         (log2(inset) - parameters.agxMinimumLog2)
             * parameters.agxInverseDynamicRange,
         0.0,
-        1.0);
+        parameters.agxMaximumLogCoordinate);
     return agxOutset(agxCurve(normalizedLog));
-}
-
-float compressHsvSaturation(float saturation, float onset)
-{
-    if (saturation <= onset) return saturation;
-    float headroom = 1.0 - onset;
-    float excess = saturation - onset;
-    return onset + headroom * excess / (headroom + excess);
 }
 
 float3 adjustHsv(float3 originalLinear, float3 mappedDisplay)
@@ -133,7 +130,7 @@ float3 adjustHsv(float3 originalLinear, float3 mappedDisplay)
     float3 originalDisplay = pow(originalLinear, 1.0 / 2.2);
     float3 originalHsv = rgbToHsv(originalDisplay);
     float3 mappedHsv = rgbToHsv(mappedDisplay);
-    float normalizedValue = clamp(mappedHsv.z, 0.0, 1.0);
+    float normalizedValue = clamp(mappedHsv.z / parameters.agxOutputPeak, 0.0, 1.0);
 
     if (originalHsv.y > 1.0e-7 && mappedHsv.y > 1.0e-7)
     {
@@ -146,11 +143,7 @@ float3 adjustHsv(float3 originalLinear, float3 mappedDisplay)
         mappedHsv.x = frac(mappedHsv.x + retention * hueOffset);
     }
 
-    float gamutOnset = lerp(
-        parameters.agxBlackGamutOnset,
-        1.0,
-        normalizedValue);
-    mappedHsv.y = compressHsvSaturation(mappedHsv.y, gamutOnset);
+    mappedHsv.y = clamp(mappedHsv.y, 0.0, 1.0);
     return hsvToRgb(mappedHsv);
 }
 
@@ -198,9 +191,9 @@ float3 prepareOutput(float3 source, float3 mapped)
     if (parameters.showAnomalies != 0)
     {
         if (any(mapped < 0.0)) return float3(0.0, 0.25, 1.0);
-        if (any(mapped > 1.0)) return float3(1.0, 0.05, 0.0);
+        if (any(mapped > parameters.agxOutputPeak)) return float3(1.0, 0.05, 0.0);
     }
-    return clamp(mapped, 0.0, 1.0);
+    return clamp(mapped, 0.0, parameters.agxOutputPeak);
 }
 
 [shader("compute")]
@@ -212,6 +205,6 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     float2 uv = (float2(pixel) + 0.5) / float2(parameters.width, parameters.height);
     float3 ap0 = inputTexture.SampleLevel(inputSampler, uv, 0.0).rgb * parameters.exposureMultiplier;
     float3 originalLinear = max(acesAp0ToRec709(ap0), 0.0);
-    float3 mapped = adjustHsv(originalLinear, agxS2O3(originalLinear));
+    float3 mapped = adjustHsv(originalLinear, agxToneScale(originalLinear));
     outputTexture.Store(pixel, float4(prepareOutput(ap0, mapped), 1.0));
 }

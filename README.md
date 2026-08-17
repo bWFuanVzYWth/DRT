@@ -4,10 +4,10 @@
 
 ```text
 Slang 2025.13+ → SPIR-V 1.3 → wgpu 30 → Vulkan / Direct3D 12 / Metal
-                                      ↘ egui / eframe 0.36 UI
+                                      ↘ egui 0.36 UI / winit presentation
 ```
 
-输入约定为 scene-linear ACES2065-1（AP0），输出为 SDR display-encoded sRGB。Oklab 路径包含肩部曲线、色域 cusp、Halley 修正和 saturation soft-min；AgX-S2O3 路径按原始 OCIO 链路先将 AP0 转为线性 BT.709、钳制负分量，再执行可调的解析 sigmoid。AgX-S2O3 的曲线结果已经是显示编码，直接写入 sRGB 呈现链路，不再叠加 OETF。不会引入 OpenDRT、Skibidi 或色彩立方体。
+输入约定为 scene-linear ACES2065-1（AP0）。所有 DRT 先输出到 display-encoded extended-sRGB `RGBA16F` 中间纹理；窗口支持时最终 pass 将其解码为线性 scRGB，并通过 wgpu 30 的 `Rgba16Float + ExtendedSrgbLinear` surface 做实际 HDR 输出，`1.0` 始终表示系统 SDR reference white。系统或显示器没有暴露 HDR surface 时自动回落到 SDR sRGB。Oklab 路径包含肩部曲线、色域 cusp、Halley 修正和 saturation soft-min；AgX-S2O3 路径按原始 OCIO 链路先将 AP0 转为线性 BT.709、钳制负分量，再执行可调的解析 sigmoid。AgX-S2O3 的曲线结果已经是显示编码，不再叠加 OETF。不会引入 OpenDRT、Skibidi 或色彩立方体。
 
 ## 环境要求
 
@@ -35,7 +35,9 @@ cargo run -- frame.exr --show-anomalies
 - `Esc`：退出；
 - 编辑 `shaders/none_drt.slang`、`shaders/oklab_drt.slang`、`shaders/agx_s2o3.slang` 或 `shaders/agx_hsv.slang` 后会分别自动热重载；编译失败时保留对应 DRT 的上一条有效管线。
 
-UI 用常驻按钮在 `None`、`Oklab`、`AgX-S2O3` 与 `AgX-HSV` 间一键切换。四者共用 `-20..+20 EV` 曝光；`None` 仅执行 AP0 到 Rec.709 和 IEC sRGB 编码，不做 tone mapping，可作为显示参考；`0.5..2.0` 高光渐近值（默认 `1.0`）仅用于 Oklab。Oklab 在亮度映射后、色域 cusp 计算前主动重排高光 hue：黄、青、洋红是吸引轴，红、绿、蓝是保持不动的分界轴，压缩量按映射后的 Oklab lightness 从可调 onset 平滑增长到白端强度；默认 onset 为 40%，白端压缩为 80%。AgX-S2O3 与 AgX-HSV 拥有互不覆盖的 tone-scale 配置。S2O3 作为原始参考，默认参数为 `-10/+6.5 EV`、输出中灰 `0.5`、枢轴对比度 `2.0`、toe/shoulder power `3.0/3.25` 和 gamut compression `0.2`；AgX-HSV 沿用三项参考曲线参数 `2.0` 与 `3.0/3.25`，gamut compression 保持 `0.05`，输出中灰采用精确的 `sRGB OETF(0.18) = 0.46135613`，使显示端线性 18% 灰保持不变。AgX-HSV 会在 2.2 编码 RGB 域比较原始 Rec.709 与 AgX 输出的 HSV 色相，并沿最短色相角修复，同时保持 AgX 输出的 value。黑端与白端色相保持度默认分别为 100% 和 50%，每个像素按钳制后的 AgX HSV value 在两端之间线性插值。其后使用 HSV saturation 软肩保证输出非负：可调的 black onset 默认 95%，white onset 固定为 100%，实际 onset 同样按 value 插值；onset 以下不变，以上平滑压缩到不超过 100%，允许 value 和 RGB 继续过曝。界面会根据 EV 容量和输出中灰动态限制最低合法斜率，避免曲线进入复数或 NaN 域。没有输入图片时使用内置的 AP0 HDR 色条和 16-stop 曝光扫描图。
+UI 用常驻按钮在 `None`、`Oklab`、`AgX-S2O3` 与 `AgX-HSV` 间一键切换。四者共用 `-20..+20 EV` 曝光；`None` 仅执行 AP0 到 Rec.709 和 IEC sRGB 编码，不做 tone mapping，可作为显示参考；`0.5..2.0` 高光渐近值（默认 `1.0`）仅用于 Oklab。Oklab 在亮度映射后、色域 cusp 计算前主动重排高光 hue：黄、青、洋红是吸引轴，红、绿、蓝是保持不动的分界轴，压缩量按映射后的 Oklab lightness 从可调 onset 平滑增长到白端强度；默认 onset 为 40%，白端压缩为 80%。AgX-S2O3 与 AgX-HSV 拥有互不覆盖的 tone-scale 配置。S2O3 作为原始 SDR 参考，默认参数为 `-10/+6.5 EV`、输出中灰 `0.5`、枢轴对比度 `2.0`、toe/shoulder power `3.0/3.25` 和 gamut compression `0.2`。
+
+AgX-HSV 是同一套 SDR/HDR DRT，不另设 HDR 变体。界面的 HDR headroom 使用显示器实时报告的 `peak / SDR white`，也可以手动降低；设为 `1.0×` 时输出峰值、曲线端点和全部 SDR tone-scale 系数数值退化为当前 SDR 行为。大于 `1.0×` 时中灰、toe、枢轴斜率和 SDR reference white 均不动，只按 extended-sRGB 输出峰值同比延长 shoulder 的输入 EV 区间与输出区间，让近线性高光继续延伸并更慢趋白。AgX-HSV 的输出中灰采用精确的 `sRGB OETF(0.18) = 0.46135613`，默认枢轴斜率 `2.46064` 与 16.5-stop 分配下的 `None` 局部斜率一致，toe power `1.55` 拟合可见暗部的中性灰阶；shoulder power 暂用 `5.2`。已知逐通道强肩部会在高饱和到低饱和的高光过渡中产生感知断层，当前暂时接受，后续需要把色彩轨迹与 tone curve 解耦。gamut compression 保持 `0.05`。AgX-HSV 会在 2.2 编码 RGB 域比较原始 Rec.709 与 AgX 输出的 HSV 色相，并沿最短色相角修复，同时保持 AgX 输出的 value。黑端与白端色相保持度默认分别为 100% 和 50%，每个像素按相对于目标峰值归一化的 AgX HSV value 在两端之间线性插值；修复后的 saturation 直接钳制到 `0..1`。界面会根据 EV 容量和输出中灰动态限制最低合法斜率，避免曲线进入复数或 NaN 域。没有输入图片时使用内置的 AP0 HDR 色条和 16-stop 曝光扫描图。
 
 顶部可在完整映射图和“映射图 + 色彩分布”两个界面间切换；分布视图支持 display-encoded sRGB 与 Oklab 坐标空间，并可拖动旋转。可视化直接用 `vertex_index` 将映射结果的每个像素变成一个点：不随机抽样、不降采样，标题会显示实际完整点数。点云使用带安全边界的正交投影，旋转不会让点越过透视近裁剪面。
 

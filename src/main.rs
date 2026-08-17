@@ -2,6 +2,7 @@ mod distribution;
 mod file_browser;
 mod gpu;
 mod image_io;
+mod presenter;
 
 use std::{
     path::{Path, PathBuf},
@@ -13,6 +14,7 @@ use eframe::egui::{self, Color32, RichText, Vec2};
 use crate::distribution::{ColorSpace, DEFAULT_PITCH, DEFAULT_YAW, DistributionRenderer};
 use crate::file_browser::{FolderBrowser, Thumbnail, ThumbnailLoader};
 use crate::gpu::{AgxParameters, DrtGpu, DrtKind, OklabHueParameters};
+use crate::presenter::{DisplayOutput, StartupOptions};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkspaceView {
@@ -20,7 +22,7 @@ enum WorkspaceView {
     Analysis,
 }
 
-fn main() -> eframe::Result {
+fn main() -> anyhow::Result<()> {
     let mut initial_image = None;
     let mut initial_folder = None;
     let mut initial_view = WorkspaceView::Image;
@@ -37,29 +39,12 @@ fn main() -> eframe::Result {
             initial_image = Some(PathBuf::from(argument));
         }
     }
-    let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 760.0])
-            .with_min_inner_size([800.0, 520.0])
-            .with_title("DRT Bench"),
-        renderer: eframe::Renderer::Wgpu,
-        centered: true,
-        ..Default::default()
-    };
-
-    eframe::run_native(
-        "DRT Bench",
-        native_options,
-        Box::new(move |context| {
-            Ok(Box::new(DrtApp::new(
-                context,
-                initial_image.as_deref(),
-                initial_folder.as_deref(),
-                initial_view,
-                initial_show_anomalies,
-            )?))
-        }),
-    )
+    presenter::run(StartupOptions {
+        initial_image,
+        initial_folder,
+        initial_view,
+        initial_show_anomalies,
+    })
 }
 
 struct DrtApp {
@@ -71,7 +56,6 @@ struct DrtApp {
     agx_hsv_parameters: AgxParameters,
     agx_black_hue_retention: f32,
     agx_white_hue_retention: f32,
-    agx_black_gamut_onset: f32,
     show_anomalies: bool,
     image_name: String,
     status: String,
@@ -87,6 +71,9 @@ struct DrtApp {
     folder_browser: Option<FolderBrowser>,
     thumbnail_loader: ThumbnailLoader,
     pending_image: Option<PendingImage>,
+    display_output: DisplayOutput,
+    hdr_target_headroom: f32,
+    hdr_target_user_set: bool,
 }
 
 struct PendingImage {
@@ -96,16 +83,14 @@ struct PendingImage {
 
 impl DrtApp {
     fn new(
-        context: &eframe::CreationContext<'_>,
+        render_state: &eframe::egui_wgpu::RenderState,
+        egui_context: &egui::Context,
         initial_image: Option<&Path>,
         initial_folder: Option<&Path>,
         initial_view: WorkspaceView,
         initial_show_anomalies: bool,
+        display_output: DisplayOutput,
     ) -> anyhow::Result<Self> {
-        let render_state = context
-            .wgpu_render_state
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("eframe did not create a wgpu render state"))?;
         let shader_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders");
         let shader_paths = [
             shader_directory.join(DrtKind::None.shader_file()),
@@ -124,13 +109,19 @@ impl DrtApp {
         );
         let mut gpu = DrtGpu::new(render_state, image)?;
         gpu.set_show_anomalies(initial_show_anomalies);
+        let hdr_target_headroom = display_output.detected_headroom.unwrap_or(1.0).max(1.0);
+        gpu.set_hdr_headroom(if display_output.hdr_surface {
+            hdr_target_headroom
+        } else {
+            1.0
+        });
 
         let folder_browser = initial_folder
             .map(|path| FolderBrowser::scan(path.to_path_buf()))
             .transpose()?;
         let mut thumbnail_loader = ThumbnailLoader::default();
         if let Some(browser) = &folder_browser {
-            thumbnail_loader.start(browser.paths(), context.egui_ctx.clone());
+            thumbnail_loader.start(browser.paths(), egui_context.clone());
         }
 
         Ok(Self {
@@ -142,7 +133,6 @@ impl DrtApp {
             agx_hsv_parameters: AgxParameters::hsv_default(),
             agx_black_hue_retention: 1.0,
             agx_white_hue_retention: 0.5,
-            agx_black_gamut_onset: 0.95,
             show_anomalies: initial_show_anomalies,
             image_name,
             status: folder_browser.as_ref().map_or_else(
@@ -161,7 +151,26 @@ impl DrtApp {
             folder_browser,
             thumbnail_loader,
             pending_image: None,
+            display_output,
+            hdr_target_headroom,
+            hdr_target_user_set: false,
         })
+    }
+
+    fn set_display_output(&mut self, display_output: DisplayOutput) {
+        if self.display_output == display_output {
+            return;
+        }
+        self.display_output = display_output;
+        if !self.hdr_target_user_set {
+            self.hdr_target_headroom = display_output.detected_headroom.unwrap_or(1.0).max(1.0);
+        }
+        let effective = if display_output.hdr_surface {
+            self.hdr_target_headroom
+        } else {
+            1.0
+        };
+        self.gpu.set_hdr_headroom(effective);
     }
 
     fn open_image(&mut self, context: &egui::Context) {
@@ -292,8 +301,8 @@ impl DrtApp {
     }
 }
 
-impl eframe::App for DrtApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+impl DrtApp {
+    fn ui(&mut self, ui: &mut egui::Ui) {
         self.poll_shader(ui.ctx());
         self.poll_image_load();
         if let Some(browser) = &mut self.folder_browser {
@@ -350,7 +359,23 @@ impl eframe::App for DrtApp {
             .show(ui, |ui| {
                 ui.heading("Display Rendering Transform");
                 ui.label("Input: scene-linear ACES2065-1 / AP0");
-                ui.label("Output: SDR sRGB");
+                match (
+                    self.display_output.hdr_surface,
+                    self.display_output.detected_headroom,
+                ) {
+                    (true, Some(headroom)) if headroom > 1.0 => {
+                        ui.label("Output: linear scRGB HDR (active)");
+                    }
+                    (true, Some(_)) => {
+                        ui.label("Output: linear scRGB (display currently SDR)");
+                    }
+                    (true, None) => {
+                        ui.label("Output: linear scRGB (HDR headroom unknown)");
+                    }
+                    (false, _) => {
+                        ui.label("Output: SDR sRGB (HDR surface unavailable)");
+                    }
+                }
                 ui.separator();
                 ui.label("DRT");
                 let mut selected_drt = self.gpu.active_drt();
@@ -370,6 +395,69 @@ impl eframe::App for DrtApp {
                     }
                     self.gpu.set_drt(selected_drt);
                     self.set_status(format!("Switched to {}", selected_drt.label()), false);
+                }
+                ui.separator();
+                ui.label(RichText::new("Display range").strong());
+                if self.display_output.hdr_surface {
+                    let detected = self.display_output.detected_headroom;
+                    let maximum = detected.unwrap_or(16.0).max(1.0);
+                    let mut headroom = self.hdr_target_headroom.clamp(1.0, maximum);
+                    let changed = ui
+                        .add(
+                            egui::Slider::new(&mut headroom, 1.0..=maximum)
+                                .step_by(0.05)
+                                .custom_formatter(|value, _| format!("{value:.2}×"))
+                                .text("HDR headroom"),
+                        )
+                        .on_hover_text(
+                            "1.0× reproduces the current SDR AgX-HSV curve exactly; higher values extend its shoulder into real HDR output",
+                        )
+                        .changed();
+                    if changed {
+                        self.hdr_target_headroom = headroom;
+                        self.hdr_target_user_set = true;
+                        self.gpu.set_hdr_headroom(headroom);
+                    }
+                    ui.horizontal(|ui| {
+                        let detected_label = detected.map_or_else(
+                            || "Detected: unknown".to_owned(),
+                            |value| format!("Detected: {value:.2}× SDR white"),
+                        );
+                        ui.label(RichText::new(detected_label).small().weak());
+                        if ui.small_button("Auto").clicked() {
+                            self.hdr_target_headroom = detected.unwrap_or(1.0).max(1.0);
+                            self.hdr_target_user_set = false;
+                            self.gpu.set_hdr_headroom(self.hdr_target_headroom);
+                        }
+                    });
+                    if let (Some(peak), Some(sdr_white)) = (
+                        self.display_output.max_nits,
+                        self.display_output.sdr_white_nits,
+                    ) {
+                        ui.label(
+                            RichText::new(format!(
+                                "Display {peak:.0} nit peak · {sdr_white:.0} nit SDR white"
+                            ))
+                            .small()
+                            .weak(),
+                        );
+                    }
+                    ui.label(
+                        RichText::new(format!(
+                            "AgX-HSV encoded peak {:.3}; 1.0 remains SDR white",
+                            self.gpu.output_peak()
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new(
+                            "OS/display exposes no HDR scRGB surface; AgX-HSV is forced to the exact SDR curve",
+                        )
+                        .small()
+                        .weak(),
+                    );
                 }
                 if self.workspace_view == WorkspaceView::Analysis {
                     ui.separator();
@@ -481,7 +569,9 @@ impl eframe::App for DrtApp {
                             .suffix(" EV")
                             .text("Highlight reach"),
                         )
-                        .on_hover_text("Scene stops above 18% gray mapped into the output range")
+                        .on_hover_text(
+                            "Scene stops above 18% gray mapped into SDR white at 1×; HDR headroom extends this reach automatically",
+                        )
                         .changed();
                     agx_changed |= ui
                         .add(
@@ -540,16 +630,25 @@ impl eframe::App for DrtApp {
                         .changed();
 
                     agx_parameters.constrain();
-                    ui.label(
-                        RichText::new(format!(
+                    let range_description = if active_drt == DrtKind::AgxHsv
+                        && self.gpu.output_peak() > 1.0
+                    {
+                        format!(
+                            "SDR {:+.2}/{:+.2} EV · HDR highlight {:+.2} EV · pivot {:.3}",
+                            agx_parameters.shadow_ev,
+                            agx_parameters.highlight_ev,
+                            agx_parameters.output_highlight_ev(self.gpu.output_peak()),
+                            agx_parameters.input_pivot(),
+                        )
+                    } else {
+                        format!(
                             "{:.2} stops · input pivot {:.3} · slope min {:.3}",
                             agx_parameters.highlight_ev - agx_parameters.shadow_ev,
                             agx_parameters.input_pivot(),
                             agx_parameters.minimum_pivot_slope(),
-                        ))
-                        .small()
-                        .weak(),
-                    );
+                        )
+                    };
+                    ui.label(RichText::new(range_description).small().weak());
                     match active_drt {
                         DrtKind::AgxS2O3 => self.agx_s2o3_parameters = agx_parameters,
                         DrtKind::AgxHsv => self.agx_hsv_parameters = agx_parameters,
@@ -602,39 +701,12 @@ impl eframe::App for DrtApp {
                                 self.agx_white_hue_retention,
                             );
                         }
-                        ui.separator();
-                        ui.label(RichText::new("HSV gamut compression").strong());
-                        if ui
-                            .add(
-                                egui::Slider::new(
-                                    &mut self.agx_black_gamut_onset,
-                                    0.0..=1.0,
-                                )
-                                .step_by(0.01)
-                                .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
-                                .text("Black onset"),
-                            )
-                            .on_hover_text(
-                                "Saturation soft-shoulder onset at V=0; the white onset at V=1 is fixed to 100%",
-                            )
-                            .changed()
-                        {
-                            self.gpu
-                                .set_agx_black_gamut_onset(self.agx_black_gamut_onset);
-                        }
-                        ui.label(
-                            RichText::new(
-                                "Onset interpolates to 100% by clamped AgX HSV value; V and hue are preserved",
-                            )
-                            .small()
-                            .weak(),
-                        );
                     }
                 }
                 if ui
                     .checkbox(&mut self.show_anomalies, "Show anomalies")
                     .on_hover_text(
-                        "NaN magenta · +Inf yellow · -Inf cyan · mixed ±Inf orange · negative blue · >1 red",
+                        "NaN magenta · +Inf yellow · -Inf cyan · mixed ±Inf orange · negative blue · above target range red",
                     )
                     .changed()
                 {
@@ -652,7 +724,7 @@ impl eframe::App for DrtApp {
                             anomaly_key(ui, Color32::from_rgb(255, 89, 0), "±Inf");
                             ui.end_row();
                             anomaly_key(ui, Color32::from_rgb(0, 64, 255), "< 0");
-                            anomaly_key(ui, Color32::from_rgb(255, 13, 0), "> 1");
+                            anomaly_key(ui, Color32::from_rgb(255, 13, 0), "> range");
                             ui.end_row();
                         });
                 }
@@ -664,7 +736,6 @@ impl eframe::App for DrtApp {
                     self.agx_hsv_parameters = AgxParameters::hsv_default();
                     self.agx_black_hue_retention = 1.0;
                     self.agx_white_hue_retention = 0.5;
-                    self.agx_black_gamut_onset = 0.95;
                     self.show_anomalies = false;
                     self.gpu.set_parameters(self.exposure_ev, self.overexposure);
                     self.gpu
@@ -681,8 +752,6 @@ impl eframe::App for DrtApp {
                         self.agx_black_hue_retention,
                         self.agx_white_hue_retention,
                     );
-                    self.gpu
-                        .set_agx_black_gamut_onset(self.agx_black_gamut_onset);
                     self.gpu.set_show_anomalies(false);
                 }
                 ui.separator();

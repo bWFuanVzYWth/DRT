@@ -124,9 +124,15 @@ impl AgxParameters {
             highlight_ev: 6.5,
             // IEC sRGB OETF(0.18): preserves scene-linear 18% gray on display.
             output_pivot: 0.461_356_13,
-            pivot_slope: 2.0,
-            toe_power: 3.0,
-            shoulder_power: 3.25,
+            // Matches the local None slope for the default 16.5-stop allocation.
+            pivot_slope: 2.460_636_6,
+            // Least-squares fit to the None neutral ramp over the visible shadows.
+            toe_power: 1.55,
+            // TODO: Known issue: the per-channel shoulder can create perceptual
+            // banding across high-to-low-saturation highlight transitions. 5.2 is
+            // the accepted artistic compromise until the color trajectory is
+            // redesigned independently from the tone curve.
+            shoulder_power: 5.2,
             gamut_compression: 0.05,
         }
     }
@@ -138,6 +144,10 @@ impl AgxParameters {
     pub fn minimum_pivot_slope(self) -> f32 {
         let input_pivot = self.input_pivot();
         (self.output_pivot / input_pivot).max((1.0 - self.output_pivot) / (1.0 - input_pivot))
+    }
+
+    pub fn output_highlight_ev(self, output_peak: f32) -> f32 {
+        self.highlight_ev * (output_peak - self.output_pivot) / (1.0 - self.output_pivot)
     }
 
     pub fn constrain(&mut self) {
@@ -175,10 +185,10 @@ struct Parameters {
     agx_shoulder_a: f32,
     agx_black_hue_retention: f32,
     agx_white_hue_retention: f32,
-    agx_black_gamut_onset: f32,
     oklab_white_hue_compression: f32,
     oklab_hue_compression_onset: f32,
-    _padding3: u32,
+    agx_maximum_log_coordinate: f32,
+    agx_output_peak: f32,
 }
 
 impl Parameters {
@@ -202,19 +212,31 @@ impl Parameters {
             agx_shoulder_a: 0.0,
             agx_black_hue_retention: 1.0,
             agx_white_hue_retention: 0.5,
-            agx_black_gamut_onset: 0.95,
             oklab_white_hue_compression: 0.8,
             oklab_hue_compression_onset: 0.4,
-            _padding3: 0,
+            agx_maximum_log_coordinate: 1.0,
+            agx_output_peak: 1.0,
         };
         parameters.set_agx(AgxParameters::default());
         parameters
     }
 
-    fn set_agx(&mut self, mut source: AgxParameters) {
+    fn set_agx(&mut self, source: AgxParameters) {
+        self.set_agx_for_headroom(source, 1.0);
+    }
+
+    fn set_agx_for_headroom(&mut self, mut source: AgxParameters, headroom: f32) {
         source.constrain();
         let dynamic_range = source.highlight_ev - source.shadow_ev;
         let input_pivot = source.input_pivot();
+        let headroom = headroom.clamp(1.0, 64.0);
+        let output_peak = if headroom == 1.0 {
+            1.0
+        } else {
+            extended_srgb_oetf(headroom)
+        };
+        let shoulder_scale = (output_peak - source.output_pivot) / (1.0 - source.output_pivot);
+        let shoulder_extent = (1.0 - input_pivot) * shoulder_scale;
 
         self.agx_minimum_log2 = 0.18_f32.log2() + source.shadow_ev;
         self.agx_inverse_dynamic_range = dynamic_range.recip();
@@ -231,11 +253,28 @@ impl Parameters {
             source.toe_power,
         );
         self.agx_shoulder_a = curve_coefficient(
-            1.0 - input_pivot,
-            1.0 - source.output_pivot,
+            shoulder_extent,
+            output_peak - source.output_pivot,
             source.pivot_slope,
             source.shoulder_power,
         );
+        self.agx_maximum_log_coordinate = if headroom == 1.0 {
+            1.0
+        } else {
+            input_pivot + shoulder_extent
+        };
+        self.agx_output_peak = output_peak;
+    }
+}
+
+fn extended_srgb_oetf(linear: f32) -> f32 {
+    if linear == 1.0 {
+        return 1.0;
+    }
+    if linear <= 0.003_130_8 {
+        12.92 * linear
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
     }
 }
 
@@ -267,6 +306,8 @@ pub struct DrtGpu {
     uniform: wgpu::Buffer,
     image: ImageResources,
     parameters: Parameters,
+    agx_parameters: AgxParameters,
+    hdr_headroom: f32,
     adapter_name: String,
     backend: wgpu::Backend,
 }
@@ -337,6 +378,8 @@ impl DrtGpu {
             uniform,
             image: image_resources,
             parameters,
+            agx_parameters: AgxParameters::default(),
+            hdr_headroom: 1.0,
             adapter_name: info.name,
             backend: info.backend,
         };
@@ -383,7 +426,23 @@ impl DrtGpu {
     }
 
     pub fn set_agx_parameters(&mut self, parameters: AgxParameters) {
-        self.parameters.set_agx(parameters);
+        self.agx_parameters = parameters;
+        self.apply_agx_parameters();
+        self.render_state.queue.write_buffer(
+            &self.uniform,
+            0,
+            bytemuck::bytes_of(&self.parameters),
+        );
+        self.dispatch();
+    }
+
+    pub fn set_hdr_headroom(&mut self, headroom: f32) {
+        let headroom = headroom.clamp(1.0, 64.0);
+        if (self.hdr_headroom - headroom).abs() < 1.0e-4 {
+            return;
+        }
+        self.hdr_headroom = headroom;
+        self.apply_agx_parameters();
         self.render_state.queue.write_buffer(
             &self.uniform,
             0,
@@ -395,16 +454,6 @@ impl DrtGpu {
     pub fn set_agx_hue_retention(&mut self, black: f32, white: f32) {
         self.parameters.agx_black_hue_retention = black.clamp(0.0, 1.0);
         self.parameters.agx_white_hue_retention = white.clamp(0.0, 1.0);
-        self.render_state.queue.write_buffer(
-            &self.uniform,
-            0,
-            bytemuck::bytes_of(&self.parameters),
-        );
-        self.dispatch();
-    }
-
-    pub fn set_agx_black_gamut_onset(&mut self, onset: f32) {
-        self.parameters.agx_black_gamut_onset = onset.clamp(0.0, 1.0);
         self.render_state.queue.write_buffer(
             &self.uniform,
             0,
@@ -438,6 +487,12 @@ impl DrtGpu {
     pub fn set_drt(&mut self, drt: DrtKind) {
         if self.active_drt != drt {
             self.active_drt = drt;
+            self.apply_agx_parameters();
+            self.render_state.queue.write_buffer(
+                &self.uniform,
+                0,
+                bytemuck::bytes_of(&self.parameters),
+            );
             self.dispatch();
         }
     }
@@ -489,6 +544,20 @@ impl DrtGpu {
     }
     pub fn backend(&self) -> wgpu::Backend {
         self.backend
+    }
+
+    pub fn output_peak(&self) -> f32 {
+        extended_srgb_oetf(self.hdr_headroom)
+    }
+
+    fn apply_agx_parameters(&mut self) {
+        let headroom = if self.active_drt == DrtKind::AgxHsv {
+            self.hdr_headroom
+        } else {
+            1.0
+        };
+        self.parameters
+            .set_agx_for_headroom(self.agx_parameters, headroom);
     }
 
     fn dispatch(&mut self) {
@@ -546,7 +615,7 @@ fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::StorageTexture {
                     access: wgpu::StorageTextureAccess::WriteOnly,
-                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    format: wgpu::TextureFormat::Rgba16Float,
                     view_dimension: wgpu::TextureViewDimension::D2,
                 },
                 count: None,
@@ -636,12 +705,12 @@ fn create_image_resources(
         extent,
     );
     let output = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("DRT sRGB output"),
+        label: Some("DRT extended-sRGB output"),
         size: extent,
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
+        format: wgpu::TextureFormat::Rgba16Float,
         usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
@@ -651,9 +720,8 @@ fn create_image_resources(
         usage: Some(wgpu::TextureUsages::TEXTURE_BINDING),
         ..Default::default()
     });
-    // The shader writes display-encoded sRGB values. egui-wgpu expects ordinary
-    // registered textures to return gamma-encoded samples, so this view must stay
-    // UNORM. egui handles the target framebuffer's transfer behavior itself.
+    // The shader writes display-encoded extended-sRGB values. The custom
+    // presenter decodes the final fp16 egui target to linear scRGB for HDR.
     let display_view = output.create_view(&wgpu::TextureViewDescriptor {
         usage: Some(wgpu::TextureUsages::TEXTURE_BINDING),
         ..Default::default()
@@ -853,7 +921,6 @@ mod tests {
         assert!((parameters.agx_shoulder_a - 69.862_79).abs() < 1.0e-3);
         assert_eq!(parameters.agx_black_hue_retention, 1.0);
         assert_eq!(parameters.agx_white_hue_retention, 0.5);
-        assert_eq!(parameters.agx_black_gamut_onset, 0.95);
     }
 
     #[test]
@@ -863,13 +930,48 @@ mod tests {
         parameters.set_agx(source);
 
         assert!((source.output_pivot - 0.461_356_13).abs() < 1.0e-7);
-        assert_eq!(source.pivot_slope, 2.0);
-        assert_eq!(source.toe_power, 3.0);
-        assert_eq!(source.shoulder_power, 3.25);
+        assert!((source.pivot_slope - 2.460_636_6).abs() < 1.0e-6);
+        assert_eq!(source.toe_power, 1.55);
+        assert_eq!(source.shoulder_power, 5.2);
         assert_eq!(source.gamut_compression, 0.05);
-        assert!((parameters.agx_toe_a - 76.974_76).abs() < 1.0e-4);
-        assert!((parameters.agx_shoulder_a - 50.411_762).abs() < 1.0e-3);
+        assert!((parameters.agx_toe_a - 11.219_474).abs() < 1.0e-4);
+        assert!((parameters.agx_shoulder_a - 2_568.749_8).abs() < 1.0e-2);
+        assert_eq!(parameters.agx_maximum_log_coordinate, 1.0);
+        assert_eq!(parameters.agx_output_peak, 1.0);
         assert_ne!(source, AgxParameters::s2o3_reference());
+    }
+
+    #[test]
+    fn unified_agx_extends_only_the_shoulder_for_hdr() {
+        let source = AgxParameters::hsv_default();
+        let mut sdr = Parameters::new(1, 1);
+        sdr.set_agx(source);
+        let mut hdr = Parameters::new(1, 1);
+        hdr.set_agx_for_headroom(source, 4.0);
+
+        assert_eq!(hdr.agx_minimum_log2, sdr.agx_minimum_log2);
+        assert_eq!(hdr.agx_inverse_dynamic_range, sdr.agx_inverse_dynamic_range);
+        assert_eq!(hdr.agx_input_pivot, sdr.agx_input_pivot);
+        assert_eq!(hdr.agx_output_pivot, sdr.agx_output_pivot);
+        assert_eq!(hdr.agx_pivot_slope, sdr.agx_pivot_slope);
+        assert_eq!(hdr.agx_toe_a, sdr.agx_toe_a);
+        assert!(hdr.agx_output_peak > 1.0);
+        assert!(hdr.agx_maximum_log_coordinate > 1.0);
+
+        let distance = hdr.agx_maximum_log_coordinate - hdr.agx_input_pivot;
+        let mapped_peak = hdr.agx_output_pivot
+            + hdr.agx_pivot_slope
+                * distance
+                * (1.0 + hdr.agx_shoulder_a * distance.powf(hdr.agx_shoulder_power))
+                    .powf(-1.0 / hdr.agx_shoulder_power);
+        assert!((mapped_peak - hdr.agx_output_peak).abs() < 2.0e-5);
+        assert!(
+            (source.output_highlight_ev(hdr.agx_output_peak)
+                - (hdr.agx_maximum_log_coordinate - hdr.agx_input_pivot)
+                    / hdr.agx_inverse_dynamic_range)
+                .abs()
+                < 2.0e-5
+        );
     }
 
     #[test]
@@ -1004,33 +1106,5 @@ mod tests {
         assert_eq!(retention(0.2, 0.8, 1.0), 0.8);
         assert_eq!(retention(0.2, 0.8, 1.5), 0.8);
         assert_eq!(retention(0.5, 0.5, 0.37), 0.5);
-    }
-
-    #[test]
-    fn hsv_gamut_soft_shoulder_is_continuous_and_bounded() {
-        let compress = |saturation: f32, onset: f32| {
-            if saturation <= onset {
-                saturation
-            } else {
-                let headroom = 1.0 - onset;
-                let excess = saturation - onset;
-                onset + headroom * excess / (headroom + excess)
-            }
-        };
-
-        assert_eq!(compress(0.8, 0.9), 0.8);
-        assert_eq!(compress(0.9, 0.9), 0.9);
-        assert!((compress(0.900_001, 0.9) - 0.900_001).abs() < 1.0e-6);
-        assert!(compress(1.0, 0.9) < 1.0);
-        assert!(compress(100.0, 0.9) < 1.0);
-        assert_eq!(compress(1.0, 1.0), 1.0);
-        assert_eq!(compress(2.0, 1.0), 1.0);
-
-        for onset in [0.0, 0.5, 0.95, 1.0] {
-            for saturation in [0.0, onset, 1.0, 2.0, 100.0] {
-                let compressed = compress(saturation, onset);
-                assert!((0.0..=1.0).contains(&compressed));
-            }
-        }
     }
 }
