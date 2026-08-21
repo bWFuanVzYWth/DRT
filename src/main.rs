@@ -3,6 +3,7 @@ mod file_browser;
 mod gpu;
 mod image_io;
 mod presenter;
+mod tone_curve;
 
 use std::{
     path::{Path, PathBuf},
@@ -15,6 +16,7 @@ use crate::distribution::{ColorSpace, DEFAULT_PITCH, DEFAULT_YAW, DistributionRe
 use crate::file_browser::{FolderBrowser, Thumbnail, ThumbnailLoader};
 use crate::gpu::{AgxParameters, DrtGpu, DrtKind, OklabHueParameters};
 use crate::presenter::{DisplayOutput, StartupOptions};
+use crate::tone_curve::ToneCurveRenderer;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkspaceView {
@@ -357,6 +359,10 @@ impl DrtApp {
             .default_size(292.0)
             .resizable(false)
             .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("controls-scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
                 ui.heading("Display Rendering Transform");
                 ui.label("Input: scene-linear ACES2065-1 / AP0");
                 match (
@@ -396,6 +402,8 @@ impl DrtApp {
                     self.gpu.set_drt(selected_drt);
                     self.set_status(format!("Switched to {}", selected_drt.label()), false);
                 }
+                ui.separator();
+                ToneCurveRenderer::paint(ui, self.gpu.active_drt().label());
                 ui.separator();
                 ui.label(RichText::new("Display range").strong());
                 if self.display_output.hdr_surface {
@@ -796,7 +804,7 @@ impl DrtApp {
                     egui::ScrollArea::vertical()
                         .id_salt("folder-image-list")
                         .auto_shrink([false, false])
-                        .max_height((ui.available_height() - 90.0).max(100.0))
+                        .max_height(300.0)
                         .show(ui, |ui| {
                             for entry in &browser.entries {
                                 let selected = self.image_path.as_ref() == Some(&entry.path)
@@ -845,6 +853,7 @@ impl DrtApp {
                     Color32::LIGHT_GREEN
                 };
                 ui.colored_label(color, &self.status);
+                    });
             });
 
         egui::Panel::bottom("status").show(ui, |ui| {

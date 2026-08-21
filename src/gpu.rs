@@ -9,7 +9,11 @@ use bytemuck::{Pod, Zeroable};
 use eframe::{egui, egui_wgpu};
 use wgpu::util::DeviceExt;
 
-use crate::{distribution::DistributionRenderer, image_io::LinearImage};
+use crate::{
+    distribution::DistributionRenderer,
+    image_io::LinearImage,
+    tone_curve::{INPUT_MAX_EV, INPUT_MIN_EV, SAMPLE_COUNT, ToneCurveRenderer},
+};
 
 const BUILT_OKLAB_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/oklab_drt.spv"));
 const BUILT_AGX_S2O3_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/agx_s2o3.spv"));
@@ -296,6 +300,13 @@ struct ImageResources {
     height: u32,
 }
 
+struct CurveResources {
+    _input: wgpu::Texture,
+    _output: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+    output_view: wgpu::TextureView,
+}
+
 pub struct DrtGpu {
     render_state: egui_wgpu::RenderState,
     bind_group_layout: wgpu::BindGroupLayout,
@@ -304,7 +315,9 @@ pub struct DrtGpu {
     active_drt: DrtKind,
     sampler: wgpu::Sampler,
     uniform: wgpu::Buffer,
+    curve_uniform: wgpu::Buffer,
     image: ImageResources,
+    curve: CurveResources,
     parameters: Parameters,
     agx_parameters: AgxParameters,
     hdr_headroom: f32,
@@ -353,6 +366,12 @@ impl DrtGpu {
             contents: bytemuck::bytes_of(&parameters),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        let curve_parameters = curve_parameters(parameters);
+        let curve_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("neutral-axis DRT parameters"),
+            contents: bytemuck::bytes_of(&curve_parameters),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
         let image_resources = create_image_resources(
             &render_state,
             &bind_group_layout,
@@ -361,12 +380,15 @@ impl DrtGpu {
             image,
             None,
         )?;
+        let curve_resources =
+            create_curve_resources(&render_state, &bind_group_layout, &sampler, &curve_uniform);
         DistributionRenderer::install(
             &render_state,
             &image_resources.analysis_view,
             image_resources.width,
             image_resources.height,
         );
+        ToneCurveRenderer::install(&render_state, &curve_resources.output_view);
 
         let mut gpu = Self {
             render_state,
@@ -376,7 +398,9 @@ impl DrtGpu {
             active_drt: DrtKind::Oklab,
             sampler,
             uniform,
+            curve_uniform,
             image: image_resources,
+            curve: curve_resources,
             parameters,
             agx_parameters: AgxParameters::default(),
             hdr_headroom: 1.0,
@@ -561,6 +585,12 @@ impl DrtGpu {
     }
 
     fn dispatch(&mut self) {
+        let curve_parameters = curve_parameters(self.parameters);
+        self.render_state.queue.write_buffer(
+            &self.curve_uniform,
+            0,
+            bytemuck::bytes_of(&curve_parameters),
+        );
         let mut encoder =
             self.render_state
                 .device
@@ -585,9 +615,19 @@ impl DrtGpu {
                 self.image.height.div_ceil(8),
                 1,
             );
+            pass.set_bind_group(0, &self.curve.bind_group, &[]);
+            pass.dispatch_workgroups(SAMPLE_COUNT.div_ceil(8), 1, 1);
         }
         self.render_state.queue.submit([encoder.finish()]);
     }
+}
+
+fn curve_parameters(mut source: Parameters) -> Parameters {
+    source.exposure_multiplier = 1.0;
+    source.width = SAMPLE_COUNT;
+    source.height = 1;
+    source.show_anomalies = 0;
+    source
 }
 
 fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
@@ -773,6 +813,96 @@ fn create_image_resources(
     })
 }
 
+fn create_curve_resources(
+    render_state: &egui_wgpu::RenderState,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    uniform: &wgpu::Buffer,
+) -> CurveResources {
+    let device = &render_state.device;
+    let extent = wgpu::Extent3d {
+        width: SAMPLE_COUNT,
+        height: 1,
+        depth_or_array_layers: 1,
+    };
+    let input = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("neutral-axis AP0 input"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let mut input_f16 = Vec::with_capacity(SAMPLE_COUNT as usize * 4);
+    for index in 0..SAMPLE_COUNT {
+        let t = index as f32 / (SAMPLE_COUNT - 1) as f32;
+        let ev = INPUT_MIN_EV + (INPUT_MAX_EV - INPUT_MIN_EV) * t;
+        let value = 0.18 * 2.0_f32.powf(ev);
+        input_f16.extend([
+            half::f16::from_f32(value),
+            half::f16::from_f32(value),
+            half::f16::from_f32(value),
+            half::f16::ONE,
+        ]);
+    }
+    render_state.queue.write_texture(
+        input.as_image_copy(),
+        bytemuck::cast_slice(&input_f16),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(SAMPLE_COUNT * 8),
+            rows_per_image: Some(1),
+        },
+        extent,
+    );
+    let output = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("neutral-axis DRT output"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let input_view = input.create_view(&Default::default());
+    let storage_view = output.create_view(&Default::default());
+    let output_view = output.create_view(&wgpu::TextureViewDescriptor {
+        usage: Some(wgpu::TextureUsages::TEXTURE_BINDING),
+        ..Default::default()
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("neutral-axis DRT bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&input_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(&storage_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: uniform.as_entire_binding(),
+            },
+        ],
+    });
+    CurveResources {
+        _input: input,
+        _output: output,
+        bind_group,
+        output_view,
+    }
+}
+
 fn compile_slang(source: &Path, output: &Path) -> Result<()> {
     let slangc = find_slangc();
     let result = Command::new(&slangc)
@@ -837,7 +967,10 @@ fn find_slangc() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgxParameters, OklabHueParameters, Parameters, curve_coefficient};
+    use super::{
+        AgxParameters, OklabHueParameters, Parameters, curve_coefficient, curve_parameters,
+    };
+    use crate::tone_curve::SAMPLE_COUNT;
 
     const PI: f32 = std::f32::consts::PI;
     const TWO_PI: f32 = std::f32::consts::TAU;
@@ -972,6 +1105,24 @@ mod tests {
                 .abs()
                 < 2.0e-5
         );
+    }
+
+    #[test]
+    fn neutral_axis_curve_is_independent_from_the_loaded_image_and_exposure() {
+        let mut image_parameters = Parameters::new(3840, 2160);
+        image_parameters.exposure_multiplier = 32.0;
+        image_parameters.show_anomalies = 1;
+        image_parameters.overexposure = 1.35;
+        image_parameters.set_agx_for_headroom(AgxParameters::hsv_default(), 4.0);
+
+        let curve = curve_parameters(image_parameters);
+        assert_eq!(curve.width, SAMPLE_COUNT);
+        assert_eq!(curve.height, 1);
+        assert_eq!(curve.exposure_multiplier, 1.0);
+        assert_eq!(curve.show_anomalies, 0);
+        assert_eq!(curve.overexposure, image_parameters.overexposure);
+        assert_eq!(curve.agx_output_peak, image_parameters.agx_output_peak);
+        assert_eq!(curve.agx_shoulder_a, image_parameters.agx_shoulder_a);
     }
 
     #[test]
