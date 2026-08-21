@@ -1,5 +1,6 @@
-// Experimental AgX-style virtual-gamut transform around a Reinhard curve.
-// Input: scene-linear ACES2065-1 (AP0). Output: display-encoded sRGB.
+// Experimental AgX-style virtual-gamut transform around a unified SDR/HDR Reinhard curve.
+// Input: scene-linear ACES2065-1 (AP0).
+// Output: display-encoded extended sRGB (1.0 is SDR reference white).
 
 struct DrtParameters
 {
@@ -28,9 +29,13 @@ struct DrtParameters
     float agxMaximumLogCoordinate;
     float agxOutputPeak;
     float reinhardGamutExpansion;
-    float reinhardInputScale;
+    float reinhardMiddleGray;
+    float reinhardOutputPeak;
+    float reinhardHueRetention;
+    float reinhardCurvePeak;
     uint padding3;
     uint padding4;
+    uint padding5;
 };
 
 [[vk::binding(0, 0)]] Texture2D<float4> inputTexture;
@@ -70,8 +75,18 @@ float3 fromExpandedGamutCoordinates(float3 color)
 
 float3 reinhard(float3 color)
 {
-    float3 scaled = color * parameters.reinhardInputScale;
-    return scaled / (1.0 + scaled);
+    float linearSlope = parameters.reinhardMiddleGray / 0.18;
+    float shoulderExtent = parameters.reinhardCurvePeak
+        - parameters.reinhardMiddleGray;
+    float3 distance = color - 0.18;
+    float3 tangentDistance = linearSlope * distance;
+    float3 linear = linearSlope * color;
+    float3 shoulder = parameters.reinhardMiddleGray
+        + tangentDistance / (1.0 + tangentDistance / shoulderExtent);
+    return float3(
+        color.x <= 0.18 ? linear.x : shoulder.x,
+        color.y <= 0.18 ? linear.y : shoulder.y,
+        color.z <= 0.18 ? linear.z : shoulder.z);
 }
 
 float3 encodeSrgb(float3 linearRgb)
@@ -83,6 +98,52 @@ float3 encodeSrgb(float3 linearRgb)
         cutoff.x ? lower.x : higher.x,
         cutoff.y ? lower.y : higher.y,
         cutoff.z ? lower.z : higher.z);
+}
+
+float3 rgbToHsv(float3 color)
+{
+    float maximum = max(color.r, max(color.g, color.b));
+    float minimum = min(color.r, min(color.g, color.b));
+    float chroma = maximum - minimum;
+    float hue = 0.0;
+    if (chroma > 1.0e-7)
+    {
+        if (maximum == color.r)
+            hue = (color.g - color.b) / chroma;
+        else if (maximum == color.g)
+            hue = (color.b - color.r) / chroma + 2.0;
+        else
+            hue = (color.r - color.g) / chroma + 4.0;
+        hue = frac(hue / 6.0);
+    }
+    float saturation = maximum > 1.0e-7 ? chroma / maximum : 0.0;
+    return float3(hue, saturation, maximum);
+}
+
+float3 hsvToRgb(float3 hsv)
+{
+    float3 primary = clamp(
+        abs(frac(hsv.x + float3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0,
+        0.0,
+        1.0);
+    return hsv.z * lerp(1.0.xxx, primary, hsv.y);
+}
+
+float3 protectHsvHue(float3 originalLinear, float3 mappedDisplay)
+{
+    if (parameters.reinhardHueRetention <= 0.0)
+        return mappedDisplay;
+
+    float3 originalHsv = rgbToHsv(encodeSrgb(originalLinear));
+    float3 mappedHsv = rgbToHsv(mappedDisplay);
+    if (originalHsv.y <= 1.0e-7 || mappedHsv.y <= 1.0e-7)
+        return mappedDisplay;
+
+    float hueOffset = originalHsv.x - mappedHsv.x;
+    hueOffset -= floor(hueOffset + 0.5);
+    mappedHsv.x = frac(
+        mappedHsv.x + parameters.reinhardHueRetention * hueOffset);
+    return hsvToRgb(mappedHsv);
 }
 
 bool hasPositiveInfinity(float3 value)
@@ -126,12 +187,13 @@ float3 prepareOutput(float3 source, float3 mapped)
     if (positiveInfinity || negativeInfinity)
         return anomalyColor(positiveInfinity, negativeInfinity);
 
+    float encodedOutputPeak = encodeSrgb(parameters.reinhardOutputPeak.xxx).x;
     if (parameters.showAnomalies != 0)
     {
         if (any(mapped < 0.0)) return float3(0.0, 0.25, 1.0);
-        if (any(mapped > 1.0)) return float3(1.0, 0.05, 0.0);
+        if (any(mapped > encodedOutputPeak)) return float3(1.0, 0.05, 0.0);
     }
-    return clamp(mapped, 0.0, 1.0);
+    return clamp(mapped, 0.0, encodedOutputPeak);
 }
 
 [shader("compute")]
@@ -147,5 +209,6 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     float3 working = toExpandedGamutCoordinates(linearRec709);
     float3 mappedLinear = fromExpandedGamutCoordinates(reinhard(working));
     float3 mappedDisplay = encodeSrgb(mappedLinear);
+    mappedDisplay = protectHsvHue(linearRec709, mappedDisplay);
     outputTexture.Store(pixel, float4(prepareOutput(ap0, mappedDisplay), 1.0));
 }

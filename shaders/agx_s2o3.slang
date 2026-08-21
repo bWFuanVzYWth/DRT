@@ -30,9 +30,13 @@ struct DrtParameters
     float agxMaximumLogCoordinate;
     float agxOutputPeak;
     float reinhardGamutExpansion;
-    float reinhardInputScale;
+    float reinhardMiddleGray;
+    float reinhardOutputPeak;
+    float reinhardHueRetention;
+    float reinhardCurvePeak;
     uint padding3;
     uint padding4;
+    uint padding5;
 };
 
 [[vk::binding(0, 0)]] Texture2D<float4> inputTexture;

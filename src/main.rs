@@ -425,7 +425,7 @@ impl DrtApp {
                                 .text("HDR headroom"),
                         )
                         .on_hover_text(
-                            "1.0× reproduces the current SDR AgX-HSV curve exactly; higher values extend its shoulder into real HDR output",
+                            "Controls the None clamp and the AgX-HSV/Reinhard-Gamut HDR range; 1.0× exactly reproduces SDR output",
                         )
                         .changed();
                     if changed {
@@ -457,9 +457,15 @@ impl DrtApp {
                             .weak(),
                         );
                     }
+                    let peak_label = match self.gpu.active_drt() {
+                        DrtKind::None => "None",
+                        DrtKind::AgxHsv => "AgX-HSV",
+                        DrtKind::ReinhardGamut => "Reinhard-Gamut",
+                        DrtKind::Oklab | DrtKind::AgxS2O3 => "HDR target",
+                    };
                     ui.label(
                         RichText::new(format!(
-                            "AgX-HSV encoded peak {:.3}; 1.0 remains SDR white",
+                            "{peak_label} encoded peak {:.3}; 1.0 remains SDR white",
                             self.gpu.output_peak()
                         ))
                         .small()
@@ -468,7 +474,7 @@ impl DrtApp {
                 } else {
                     ui.label(
                         RichText::new(
-                            "OS/display exposes no HDR scRGB surface; AgX-HSV is forced to the exact SDR curve",
+                            "OS/display exposes no HDR scRGB surface; None, AgX-HSV, and Reinhard-Gamut are forced to their SDR ranges",
                         )
                         .small()
                         .weak(),
@@ -575,14 +581,60 @@ impl DrtApp {
                             .text("Reinhard input scale"),
                         )
                         .on_hover_text(
-                            "Multiplies the expanded-gamut coordinates before x / (1 + x); the default preserves scene-linear 18% gray",
+                            "Defines the target 18% gray output; Highlight reach and HDR headroom determine the effective curve scale",
                         )
                         .changed();
                     self.reinhard_parameters.constrain();
+                    let minimum_reach = self.reinhard_parameters.minimum_highlight_reach_ev();
+                    reinhard_changed |= ui
+                        .add(
+                            egui::Slider::new(
+                                &mut self.reinhard_parameters.highlight_reach_ev,
+                                minimum_reach..=20.0,
+                            )
+                            .step_by(0.25)
+                            .suffix(" EV")
+                            .text("Highlight reach"),
+                        )
+                        .on_hover_text(
+                            "Scene stops above 18% gray that first reach the display peak; shorter reach permits more curve overexposure and preserves stronger mid-highlight color",
+                        )
+                        .changed();
+                    reinhard_changed |= ui
+                        .add(
+                            egui::Slider::new(
+                                &mut self.reinhard_parameters.hue_retention,
+                                0.0..=1.0,
+                            )
+                            .step_by(0.01)
+                            .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
+                            .text("HSV hue retention"),
+                        )
+                        .on_hover_text(
+                            "Moves the mapped hue toward the original sRGB hue along the shortest angular path; mapped saturation and value stay unchanged",
+                        )
+                        .changed();
+                    self.reinhard_parameters.constrain();
+                    let curve = self
+                        .reinhard_parameters
+                        .curve_for_headroom(self.gpu.output_headroom());
                     ui.label(
                         RichText::new(format!(
-                            "18% gray → {:.3} linear · expand → Reinhard → exact gamut inverse → sRGB",
+                            "18% gray → {:.3} · SDR reach {:+.2} EV · effective reach {:+.2} EV",
                             self.reinhard_parameters.mapped_middle_gray(),
+                            self.reinhard_parameters.highlight_reach_ev,
+                            curve.highlight_reach_ev,
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                    ui.label(
+                        RichText::new(format!(
+                            "Curve asymptote {:.3}× · display clamp {:.3}× · linear slope {:.3} · shoulder rate {:.3}",
+                            curve.curve_peak,
+                            self.gpu.output_headroom(),
+                            curve.linear_slope,
+                            curve.shoulder_scale,
                         ))
                         .small()
                         .weak(),

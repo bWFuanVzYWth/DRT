@@ -1,5 +1,6 @@
 // Display reference with no tone mapping.
-// Input: scene-linear ACES2065-1 (AP0). Output: display-encoded sRGB.
+// Input: scene-linear ACES2065-1 (AP0).
+// Output: display-encoded extended sRGB (1.0 is SDR reference white).
 
 struct DrtParameters
 {
@@ -28,9 +29,13 @@ struct DrtParameters
     float agxMaximumLogCoordinate;
     float agxOutputPeak;
     float reinhardGamutExpansion;
-    float reinhardInputScale;
+    float reinhardMiddleGray;
+    float reinhardOutputPeak;
+    float reinhardHueRetention;
+    float reinhardCurvePeak;
     uint padding3;
     uint padding4;
+    uint padding5;
 };
 
 [[vk::binding(0, 0)]] Texture2D<float4> inputTexture;
@@ -98,12 +103,13 @@ float3 prepareOutput(float3 source, float3 mapped)
     if (positiveInfinity || negativeInfinity)
         return anomalyColor(positiveInfinity, negativeInfinity);
 
+    float encodedOutputPeak = encodeSrgb(parameters.reinhardOutputPeak.xxx).x;
     if (parameters.showAnomalies != 0)
     {
         if (any(mapped < 0.0)) return float3(0.0, 0.25, 1.0);
-        if (any(mapped > 1.0)) return float3(1.0, 0.05, 0.0);
+        if (any(mapped > encodedOutputPeak)) return float3(1.0, 0.05, 0.0);
     }
-    return clamp(mapped, 0.0, 1.0);
+    return clamp(mapped, 0.0, encodedOutputPeak);
 }
 
 [shader("compute")]

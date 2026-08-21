@@ -109,14 +109,27 @@ impl OklabHueParameters {
 pub struct ReinhardParameters {
     pub gamut_expansion: f32,
     pub input_scale: f32,
+    pub highlight_reach_ev: f32,
+    pub hue_retention: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReinhardCurveParameters {
+    pub middle_gray: f32,
+    pub linear_slope: f32,
+    pub shoulder_scale: f32,
+    pub curve_peak: f32,
+    pub highlight_reach_ev: f32,
 }
 
 impl Default for ReinhardParameters {
     fn default() -> Self {
         Self {
-            gamut_expansion: 0.2,
+            gamut_expansion: 0.03,
             // scale*x/(1+scale*x) maps scene-linear 18% gray back to 18%.
             input_scale: 1.0 / (1.0 - 0.18),
+            highlight_reach_ev: 6.5,
+            hue_retention: 0.5,
         }
     }
 }
@@ -125,11 +138,41 @@ impl ReinhardParameters {
     pub fn constrain(&mut self) {
         self.gamut_expansion = self.gamut_expansion.clamp(0.0, 0.8);
         self.input_scale = self.input_scale.clamp(0.1, 8.0);
+        self.highlight_reach_ev = self
+            .highlight_reach_ev
+            .clamp(self.minimum_highlight_reach_ev(), 20.0);
+        self.hue_retention = self.hue_retention.clamp(0.0, 1.0);
     }
 
     pub fn mapped_middle_gray(self) -> f32 {
         let scaled = 0.18 * self.input_scale;
         scaled / (1.0 + scaled)
+    }
+
+    pub fn minimum_highlight_reach_ev(self) -> f32 {
+        (1.0 / self.mapped_middle_gray()).log2() + 0.1
+    }
+
+    pub fn curve_for_headroom(mut self, headroom: f32) -> ReinhardCurveParameters {
+        self.constrain();
+        let headroom = headroom.clamp(1.0, 64.0);
+        let mapped_middle_gray = self.mapped_middle_gray();
+        let effective_reach = self.highlight_reach_ev + headroom.log2();
+        let reach_ratio = 2.0_f32.powf(effective_reach);
+        let linear_slope = mapped_middle_gray / 0.18;
+        let tangent_distance = mapped_middle_gray * (reach_ratio - 1.0);
+        let output_distance = headroom - mapped_middle_gray;
+        let shoulder_extent =
+            output_distance * tangent_distance / (tangent_distance - output_distance);
+        let curve_peak = mapped_middle_gray + shoulder_extent;
+        let shoulder_scale = linear_slope / shoulder_extent;
+        ReinhardCurveParameters {
+            middle_gray: mapped_middle_gray,
+            linear_slope,
+            shoulder_scale,
+            curve_peak,
+            highlight_reach_ev: effective_reach,
+        }
     }
 }
 
@@ -235,8 +278,11 @@ struct Parameters {
     agx_maximum_log_coordinate: f32,
     agx_output_peak: f32,
     reinhard_gamut_expansion: f32,
-    reinhard_input_scale: f32,
-    _padding4: [u32; 2],
+    reinhard_middle_gray: f32,
+    reinhard_output_peak: f32,
+    reinhard_hue_retention: f32,
+    reinhard_curve_peak: f32,
+    _padding4: [u32; 3],
 }
 
 impl Parameters {
@@ -265,10 +311,14 @@ impl Parameters {
             agx_maximum_log_coordinate: 1.0,
             agx_output_peak: 1.0,
             reinhard_gamut_expansion: ReinhardParameters::default().gamut_expansion,
-            reinhard_input_scale: ReinhardParameters::default().input_scale,
-            _padding4: [0; 2],
+            reinhard_middle_gray: ReinhardParameters::default().mapped_middle_gray(),
+            reinhard_output_peak: 1.0,
+            reinhard_hue_retention: ReinhardParameters::default().hue_retention,
+            reinhard_curve_peak: 1.0,
+            _padding4: [0; 3],
         };
         parameters.set_agx(AgxParameters::default());
+        parameters.set_reinhard_for_headroom(ReinhardParameters::default(), 1.0);
         parameters
     }
 
@@ -316,6 +366,17 @@ impl Parameters {
         };
         self.agx_output_peak = output_peak;
     }
+
+    fn set_reinhard_for_headroom(&mut self, mut source: ReinhardParameters, headroom: f32) {
+        source.constrain();
+        let headroom = headroom.clamp(1.0, 64.0);
+        let curve = source.curve_for_headroom(headroom);
+        self.reinhard_gamut_expansion = source.gamut_expansion;
+        self.reinhard_middle_gray = curve.middle_gray;
+        self.reinhard_output_peak = headroom;
+        self.reinhard_hue_retention = source.hue_retention;
+        self.reinhard_curve_peak = curve.curve_peak;
+    }
 }
 
 fn extended_srgb_oetf(linear: f32) -> f32 {
@@ -326,6 +387,14 @@ fn extended_srgb_oetf(linear: f32) -> f32 {
         12.92 * linear
     } else {
         1.055 * linear.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+fn direct_output_headroom(drt: DrtKind, headroom: f32) -> f32 {
+    if matches!(drt, DrtKind::None | DrtKind::ReinhardGamut) {
+        headroom
+    } else {
+        1.0
     }
 }
 
@@ -367,6 +436,7 @@ pub struct DrtGpu {
     curve: CurveResources,
     parameters: Parameters,
     agx_parameters: AgxParameters,
+    reinhard_parameters: ReinhardParameters,
     hdr_headroom: f32,
     adapter_name: String,
     backend: wgpu::Backend,
@@ -456,6 +526,7 @@ impl DrtGpu {
             curve: curve_resources,
             parameters,
             agx_parameters: AgxParameters::default(),
+            reinhard_parameters: ReinhardParameters::default(),
             hdr_headroom: 1.0,
             adapter_name: info.name,
             backend: info.backend,
@@ -520,6 +591,7 @@ impl DrtGpu {
         }
         self.hdr_headroom = headroom;
         self.apply_agx_parameters();
+        self.apply_reinhard_parameters();
         self.render_state.queue.write_buffer(
             &self.uniform,
             0,
@@ -541,8 +613,8 @@ impl DrtGpu {
 
     pub fn set_reinhard_parameters(&mut self, mut source: ReinhardParameters) {
         source.constrain();
-        self.parameters.reinhard_gamut_expansion = source.gamut_expansion;
-        self.parameters.reinhard_input_scale = source.input_scale;
+        self.reinhard_parameters = source;
+        self.apply_reinhard_parameters();
         self.render_state.queue.write_buffer(
             &self.uniform,
             0,
@@ -577,6 +649,7 @@ impl DrtGpu {
         if self.active_drt != drt {
             self.active_drt = drt;
             self.apply_agx_parameters();
+            self.apply_reinhard_parameters();
             self.render_state.queue.write_buffer(
                 &self.uniform,
                 0,
@@ -640,6 +713,10 @@ impl DrtGpu {
         extended_srgb_oetf(self.hdr_headroom)
     }
 
+    pub fn output_headroom(&self) -> f32 {
+        self.hdr_headroom
+    }
+
     fn apply_agx_parameters(&mut self) {
         let headroom = if self.active_drt == DrtKind::AgxHsv {
             self.hdr_headroom
@@ -648,6 +725,12 @@ impl DrtGpu {
         };
         self.parameters
             .set_agx_for_headroom(self.agx_parameters, headroom);
+    }
+
+    fn apply_reinhard_parameters(&mut self) {
+        let headroom = direct_output_headroom(self.active_drt, self.hdr_headroom);
+        self.parameters
+            .set_reinhard_for_headroom(self.reinhard_parameters, headroom);
     }
 
     fn dispatch(&mut self) {
@@ -1035,8 +1118,8 @@ fn find_slangc() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgxParameters, OklabHueParameters, Parameters, ReinhardParameters, curve_coefficient,
-        curve_parameters,
+        AgxParameters, DrtKind, OklabHueParameters, Parameters, ReinhardParameters,
+        curve_coefficient, curve_parameters, direct_output_headroom, extended_srgb_oetf,
     };
     use crate::tone_curve::SAMPLE_COUNT;
 
@@ -1192,6 +1275,7 @@ mod tests {
         image_parameters.show_anomalies = 1;
         image_parameters.overexposure = 1.35;
         image_parameters.set_agx_for_headroom(AgxParameters::hsv_default(), 4.0);
+        image_parameters.set_reinhard_for_headroom(ReinhardParameters::default(), 4.0);
 
         let curve = curve_parameters(image_parameters);
         assert_eq!(curve.width, SAMPLE_COUNT);
@@ -1206,8 +1290,20 @@ mod tests {
             image_parameters.reinhard_gamut_expansion
         );
         assert_eq!(
-            curve.reinhard_input_scale,
-            image_parameters.reinhard_input_scale
+            curve.reinhard_middle_gray,
+            image_parameters.reinhard_middle_gray
+        );
+        assert_eq!(
+            curve.reinhard_output_peak,
+            image_parameters.reinhard_output_peak
+        );
+        assert_eq!(
+            curve.reinhard_hue_retention,
+            image_parameters.reinhard_hue_retention
+        );
+        assert_eq!(
+            curve.reinhard_curve_peak,
+            image_parameters.reinhard_curve_peak
         );
     }
 
@@ -1216,12 +1312,86 @@ mod tests {
         let source = ReinhardParameters::default();
         let parameters = Parameters::new(1280, 720);
 
-        assert_eq!(source.gamut_expansion, 0.2);
+        assert_eq!(source.gamut_expansion, 0.03);
         assert!((source.input_scale - 1.219_512_2).abs() < 1.0e-7);
+        assert_eq!(source.highlight_reach_ev, 6.5);
+        assert_eq!(source.hue_retention, 0.5);
         assert!((source.mapped_middle_gray() - 0.18).abs() < 1.0e-7);
+        let curve = source.curve_for_headroom(1.0);
         assert_eq!(parameters.reinhard_gamut_expansion, source.gamut_expansion);
-        assert_eq!(parameters.reinhard_input_scale, source.input_scale);
-        assert_eq!(std::mem::size_of::<Parameters>(), 112);
+        assert_eq!(parameters.reinhard_middle_gray, curve.middle_gray);
+        assert_eq!(parameters.reinhard_output_peak, 1.0);
+        assert_eq!(parameters.reinhard_hue_retention, 0.5);
+        assert_eq!(parameters.reinhard_curve_peak, curve.curve_peak);
+        assert!(curve.curve_peak > 1.04 && curve.curve_peak < 1.05);
+        assert_eq!(std::mem::size_of::<Parameters>(), 128);
+    }
+
+    #[test]
+    fn none_uses_the_requested_hdr_headroom_without_tone_mapping() {
+        assert_eq!(direct_output_headroom(DrtKind::None, 4.0), 4.0);
+        assert_eq!(direct_output_headroom(DrtKind::ReinhardGamut, 4.0), 4.0);
+        assert_eq!(direct_output_headroom(DrtKind::Oklab, 4.0), 1.0);
+        assert_eq!(direct_output_headroom(DrtKind::AgxS2O3, 4.0), 1.0);
+        assert_eq!(direct_output_headroom(DrtKind::AgxHsv, 4.0), 1.0);
+
+        let encoded_peak = extended_srgb_oetf(direct_output_headroom(DrtKind::None, 4.0));
+        assert!(encoded_peak > 1.0);
+    }
+
+    #[test]
+    fn reinhard_reach_hits_the_display_peak_and_preserves_middle_gray() {
+        for source in [
+            ReinhardParameters::default(),
+            ReinhardParameters {
+                gamut_expansion: 0.35,
+                input_scale: 2.0,
+                highlight_reach_ev: 7.0,
+                hue_retention: 0.75,
+            },
+        ] {
+            let target_middle_gray = source.mapped_middle_gray();
+            for headroom in [1.0, 2.0, 4.0, 16.0] {
+                let curve = source.curve_for_headroom(headroom);
+                let evaluate = |value: f32| {
+                    if value <= 0.18 {
+                        curve.linear_slope * value
+                    } else {
+                        let distance = value - 0.18;
+                        let tangent_distance = curve.linear_slope * distance;
+                        curve.middle_gray
+                            + tangent_distance / (1.0 + curve.shoulder_scale * distance)
+                    }
+                };
+                let mapped_gray = evaluate(0.18);
+                let reach_input = 0.18 * 2.0_f32.powf(curve.highlight_reach_ev);
+                let mapped_reach = evaluate(reach_input);
+                assert!((mapped_gray - target_middle_gray).abs() < 1.0e-6);
+                assert!((mapped_reach - headroom).abs() < 2.0e-5);
+                assert!(curve.curve_peak > headroom);
+                assert_eq!(evaluate(0.0), 0.0);
+                assert!((evaluate(0.09) - 0.5 * target_middle_gray).abs() < 1.0e-6);
+                assert!(
+                    (curve.shoulder_scale * (curve.curve_peak - curve.middle_gray)
+                        - curve.linear_slope)
+                        .abs()
+                        < 1.0e-6
+                );
+                assert!(
+                    (curve.highlight_reach_ev - (source.highlight_reach_ev + headroom.log2()))
+                        .abs()
+                        < 1.0e-6
+                );
+
+                let mut parameters = Parameters::new(1, 1);
+                parameters.set_reinhard_for_headroom(source, headroom);
+                assert_eq!(parameters.reinhard_gamut_expansion, source.gamut_expansion);
+                assert_eq!(parameters.reinhard_middle_gray, curve.middle_gray);
+                assert_eq!(parameters.reinhard_output_peak, headroom);
+                assert_eq!(parameters.reinhard_hue_retention, source.hue_retention);
+                assert_eq!(parameters.reinhard_curve_peak, curve.curve_peak);
+            }
+        }
     }
 
     #[test]
@@ -1249,11 +1419,18 @@ mod tests {
         let mut source = ReinhardParameters {
             gamut_expansion: 1.0,
             input_scale: -1.0,
+            highlight_reach_ev: -10.0,
+            hue_retention: 2.0,
         };
         source.constrain();
 
         assert_eq!(source.gamut_expansion, 0.8);
         assert_eq!(source.input_scale, 0.1);
+        assert_eq!(
+            source.highlight_reach_ev,
+            source.minimum_highlight_reach_ev()
+        );
+        assert_eq!(source.hue_retention, 1.0);
     }
 
     #[test]
