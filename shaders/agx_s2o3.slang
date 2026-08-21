@@ -29,6 +29,10 @@ struct DrtParameters
     float oklabHueCompressionOnset;
     float agxMaximumLogCoordinate;
     float agxOutputPeak;
+    float reinhardGamutExpansion;
+    float reinhardInputScale;
+    uint padding3;
+    uint padding4;
 };
 
 [[vk::binding(0, 0)]] Texture2D<float4> inputTexture;

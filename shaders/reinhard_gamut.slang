@@ -1,4 +1,4 @@
-// Display reference with no tone mapping.
+// Experimental AgX-style virtual-gamut transform around a Reinhard curve.
 // Input: scene-linear ACES2065-1 (AP0). Output: display-encoded sRGB.
 
 struct DrtParameters
@@ -38,12 +38,40 @@ struct DrtParameters
 [[vk::binding(2, 0)]] [vk::image_format("rgba16f")] WTexture2D<float4> outputTexture;
 [[vk::binding(3, 0)]] ConstantBuffer<DrtParameters> parameters;
 
+static const float3 NEUTRAL_WEIGHTS = float3(
+    0.2120053547549465,
+    0.3921825078090138,
+    0.3958121374360396);
+
 float3 acesAp0ToRec709(float3 ap0)
 {
     return float3(
         dot(ap0, float3(2.5214008886, -1.1339957494, -0.3875618568)),
         dot(ap0, float3(-0.2762140616, 1.3725955663, -0.0962823557)),
         dot(ap0, float3(-0.0153202001, -0.1529925618, 1.1683871996)));
+}
+
+float3 toExpandedGamutCoordinates(float3 color)
+{
+    // Moving the virtual primaries outward makes the coordinates of an
+    // unchanged Rec.709 color contract toward the neutral axis.
+    float neutral = dot(color, NEUTRAL_WEIGHTS);
+    return lerp(color, neutral.xxx, parameters.reinhardGamutExpansion);
+}
+
+float3 fromExpandedGamutCoordinates(float3 color)
+{
+    // The neutral projection is invariant, making this the exact inverse of
+    // toExpandedGamutCoordinates before the intervening nonlinear curve.
+    float neutral = dot(color, NEUTRAL_WEIGHTS);
+    return (color - parameters.reinhardGamutExpansion * neutral.xxx)
+        / (1.0 - parameters.reinhardGamutExpansion);
+}
+
+float3 reinhard(float3 color)
+{
+    float3 scaled = color * parameters.reinhardInputScale;
+    return scaled / (1.0 + scaled);
 }
 
 float3 encodeSrgb(float3 linearRgb)
@@ -113,7 +141,11 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     uint2 pixel = dispatchThreadId.xy;
     if (pixel.x >= parameters.width || pixel.y >= parameters.height) return;
     float2 uv = (float2(pixel) + 0.5) / float2(parameters.width, parameters.height);
-    float3 ap0 = inputTexture.SampleLevel(inputSampler, uv, 0.0).rgb * parameters.exposureMultiplier;
-    float3 mapped = encodeSrgb(acesAp0ToRec709(ap0));
-    outputTexture.Store(pixel, float4(prepareOutput(ap0, mapped), 1.0));
+    float3 ap0 = inputTexture.SampleLevel(inputSampler, uv, 0.0).rgb
+        * parameters.exposureMultiplier;
+    float3 linearRec709 = max(acesAp0ToRec709(ap0), 0.0);
+    float3 working = toExpandedGamutCoordinates(linearRec709);
+    float3 mappedLinear = fromExpandedGamutCoordinates(reinhard(working));
+    float3 mappedDisplay = encodeSrgb(mappedLinear);
+    outputTexture.Store(pixel, float4(prepareOutput(ap0, mappedDisplay), 1.0));
 }

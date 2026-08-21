@@ -12,6 +12,7 @@ fn main() {
     println!("cargo:rerun-if-changed=shaders/oklab_drt.slang");
     println!("cargo:rerun-if-changed=shaders/agx_s2o3.slang");
     println!("cargo:rerun-if-changed=shaders/agx_hsv.slang");
+    println!("cargo:rerun-if-changed=shaders/reinhard_gamut.slang");
     println!("cargo:rerun-if-env-changed=SLANGC");
 
     let slangc = find_slangc();
@@ -23,6 +24,7 @@ fn main() {
         ("shaders/oklab_drt.slang", "oklab_drt.spv"),
         ("shaders/agx_s2o3.slang", "agx_s2o3.spv"),
         ("shaders/agx_hsv.slang", "agx_hsv.spv"),
+        ("shaders/reinhard_gamut.slang", "reinhard_gamut.spv"),
     ] {
         compile(&slangc, Path::new(source), &output_directory.join(output));
     }

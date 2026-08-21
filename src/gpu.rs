@@ -18,6 +18,8 @@ use crate::{
 const BUILT_OKLAB_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/oklab_drt.spv"));
 const BUILT_AGX_S2O3_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/agx_s2o3.spv"));
 const BUILT_AGX_HSV_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/agx_hsv.spv"));
+const BUILT_REINHARD_GAMUT_SHADER: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/reinhard_gamut.spv"));
 const BUILT_NONE_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/none_drt.spv"));
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,10 +28,17 @@ pub enum DrtKind {
     Oklab,
     AgxS2O3,
     AgxHsv,
+    ReinhardGamut,
 }
 
 impl DrtKind {
-    pub const ALL: [Self; 4] = [Self::None, Self::Oklab, Self::AgxS2O3, Self::AgxHsv];
+    pub const ALL: [Self; 5] = [
+        Self::None,
+        Self::Oklab,
+        Self::AgxS2O3,
+        Self::AgxHsv,
+        Self::ReinhardGamut,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -37,6 +46,7 @@ impl DrtKind {
             Self::Oklab => "Oklab",
             Self::AgxS2O3 => "AgX-S2O3",
             Self::AgxHsv => "AgX-HSV",
+            Self::ReinhardGamut => "Reinhard-Gamut",
         }
     }
 
@@ -46,6 +56,7 @@ impl DrtKind {
             Self::Oklab => "oklab_drt.slang",
             Self::AgxS2O3 => "agx_s2o3.slang",
             Self::AgxHsv => "agx_hsv.slang",
+            Self::ReinhardGamut => "reinhard_gamut.slang",
         }
     }
 
@@ -55,6 +66,7 @@ impl DrtKind {
             Self::Oklab => 1,
             Self::AgxS2O3 => 2,
             Self::AgxHsv => 3,
+            Self::ReinhardGamut => 4,
         }
     }
 
@@ -68,6 +80,7 @@ struct DrtPipelines {
     oklab: wgpu::ComputePipeline,
     agx_s2o3: wgpu::ComputePipeline,
     agx_hsv: wgpu::ComputePipeline,
+    reinhard_gamut: wgpu::ComputePipeline,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -89,6 +102,34 @@ impl OklabHueParameters {
     pub fn constrain(&mut self) {
         self.white_compression = self.white_compression.clamp(0.0, 1.0);
         self.onset = self.onset.clamp(0.0, 0.99);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReinhardParameters {
+    pub gamut_expansion: f32,
+    pub input_scale: f32,
+}
+
+impl Default for ReinhardParameters {
+    fn default() -> Self {
+        Self {
+            gamut_expansion: 0.2,
+            // scale*x/(1+scale*x) maps scene-linear 18% gray back to 18%.
+            input_scale: 1.0 / (1.0 - 0.18),
+        }
+    }
+}
+
+impl ReinhardParameters {
+    pub fn constrain(&mut self) {
+        self.gamut_expansion = self.gamut_expansion.clamp(0.0, 0.8);
+        self.input_scale = self.input_scale.clamp(0.1, 8.0);
+    }
+
+    pub fn mapped_middle_gray(self) -> f32 {
+        let scaled = 0.18 * self.input_scale;
+        scaled / (1.0 + scaled)
     }
 }
 
@@ -193,6 +234,9 @@ struct Parameters {
     oklab_hue_compression_onset: f32,
     agx_maximum_log_coordinate: f32,
     agx_output_peak: f32,
+    reinhard_gamut_expansion: f32,
+    reinhard_input_scale: f32,
+    _padding4: [u32; 2],
 }
 
 impl Parameters {
@@ -220,6 +264,9 @@ impl Parameters {
             oklab_hue_compression_onset: 0.4,
             agx_maximum_log_coordinate: 1.0,
             agx_output_peak: 1.0,
+            reinhard_gamut_expansion: ReinhardParameters::default().gamut_expansion,
+            reinhard_input_scale: ReinhardParameters::default().input_scale,
+            _padding4: [0; 2],
         };
         parameters.set_agx(AgxParameters::default());
         parameters
@@ -350,6 +397,12 @@ impl DrtGpu {
                 &pipeline_layout,
                 BUILT_AGX_HSV_SHADER,
                 "AgX-HSV DRT",
+            )?,
+            reinhard_gamut: create_pipeline(
+                device,
+                &pipeline_layout,
+                BUILT_REINHARD_GAMUT_SHADER,
+                "Reinhard-Gamut DRT",
             )?,
         };
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -486,6 +539,18 @@ impl DrtGpu {
         self.dispatch();
     }
 
+    pub fn set_reinhard_parameters(&mut self, mut source: ReinhardParameters) {
+        source.constrain();
+        self.parameters.reinhard_gamut_expansion = source.gamut_expansion;
+        self.parameters.reinhard_input_scale = source.input_scale;
+        self.render_state.queue.write_buffer(
+            &self.uniform,
+            0,
+            bytemuck::bytes_of(&self.parameters),
+        );
+        self.dispatch();
+    }
+
     pub fn set_oklab_hue_parameters(&mut self, mut source: OklabHueParameters) {
         source.constrain();
         self.parameters.oklab_white_hue_compression = source.white_compression;
@@ -547,6 +612,7 @@ impl DrtGpu {
             DrtKind::Oklab => self.pipelines.oklab = next,
             DrtKind::AgxS2O3 => self.pipelines.agx_s2o3 = next,
             DrtKind::AgxHsv => self.pipelines.agx_hsv = next,
+            DrtKind::ReinhardGamut => self.pipelines.reinhard_gamut = next,
         }
         if self.active_drt == drt {
             self.dispatch();
@@ -607,6 +673,7 @@ impl DrtGpu {
                 DrtKind::Oklab => &self.pipelines.oklab,
                 DrtKind::AgxS2O3 => &self.pipelines.agx_s2o3,
                 DrtKind::AgxHsv => &self.pipelines.agx_hsv,
+                DrtKind::ReinhardGamut => &self.pipelines.reinhard_gamut,
             };
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &self.image.bind_group, &[]);
@@ -968,7 +1035,8 @@ fn find_slangc() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgxParameters, OklabHueParameters, Parameters, curve_coefficient, curve_parameters,
+        AgxParameters, OklabHueParameters, Parameters, ReinhardParameters, curve_coefficient,
+        curve_parameters,
     };
     use crate::tone_curve::SAMPLE_COUNT;
 
@@ -1016,6 +1084,16 @@ mod tests {
     fn highlight_hue_amount(lightness: f32, onset: f32, white_amount: f32) -> f32 {
         let t = ((lightness - onset) / (1.0 - onset)).clamp(0.0, 1.0);
         white_amount * t * t * (3.0 - 2.0 * t)
+    }
+
+    fn to_expanded_gamut(color: [f32; 3], expansion: f32) -> [f32; 3] {
+        let neutral = color[0] * 0.212_005_35 + color[1] * 0.392_182_5 + color[2] * 0.395_812_12;
+        color.map(|component| component + expansion * (neutral - component))
+    }
+
+    fn from_expanded_gamut(color: [f32; 3], expansion: f32) -> [f32; 3] {
+        let neutral = color[0] * 0.212_005_35 + color[1] * 0.392_182_5 + color[2] * 0.395_812_12;
+        color.map(|component| (component - expansion * neutral) / (1.0 - expansion))
     }
 
     fn curve_value(
@@ -1123,6 +1201,59 @@ mod tests {
         assert_eq!(curve.overexposure, image_parameters.overexposure);
         assert_eq!(curve.agx_output_peak, image_parameters.agx_output_peak);
         assert_eq!(curve.agx_shoulder_a, image_parameters.agx_shoulder_a);
+        assert_eq!(
+            curve.reinhard_gamut_expansion,
+            image_parameters.reinhard_gamut_expansion
+        );
+        assert_eq!(
+            curve.reinhard_input_scale,
+            image_parameters.reinhard_input_scale
+        );
+    }
+
+    #[test]
+    fn reinhard_defaults_preserve_scene_linear_middle_gray() {
+        let source = ReinhardParameters::default();
+        let parameters = Parameters::new(1280, 720);
+
+        assert_eq!(source.gamut_expansion, 0.2);
+        assert!((source.input_scale - 1.219_512_2).abs() < 1.0e-7);
+        assert!((source.mapped_middle_gray() - 0.18).abs() < 1.0e-7);
+        assert_eq!(parameters.reinhard_gamut_expansion, source.gamut_expansion);
+        assert_eq!(parameters.reinhard_input_scale, source.input_scale);
+        assert_eq!(std::mem::size_of::<Parameters>(), 112);
+    }
+
+    #[test]
+    fn virtual_gamut_coordinates_have_an_exact_inverse() {
+        let color = [1.0, 0.25, 0.03];
+        for expansion in [0.0, 0.2, 0.5, 0.8] {
+            let expanded = to_expanded_gamut(color, expansion);
+            let restored = from_expanded_gamut(expanded, expansion);
+            for channel in 0..3 {
+                assert!((restored[channel] - color[channel]).abs() < 2.0e-6);
+            }
+
+            let original_span = color[0] - color[2];
+            let expanded_span = expanded[0] - expanded[2];
+            assert!((expanded_span - original_span * (1.0 - expansion)).abs() < 2.0e-6);
+
+            let gray = [0.18; 3];
+            assert_eq!(to_expanded_gamut(gray, expansion), gray);
+            assert_eq!(from_expanded_gamut(gray, expansion), gray);
+        }
+    }
+
+    #[test]
+    fn reinhard_parameter_constraints_keep_the_inverse_well_conditioned() {
+        let mut source = ReinhardParameters {
+            gamut_expansion: 1.0,
+            input_scale: -1.0,
+        };
+        source.constrain();
+
+        assert_eq!(source.gamut_expansion, 0.8);
+        assert_eq!(source.input_scale, 0.1);
     }
 
     #[test]
