@@ -35,7 +35,7 @@ cargo run -- frame.exr --show-anomalies
 - `Esc`：退出；
 - 编辑 `shaders/none_drt.slang`、`shaders/oklab_drt.slang`、`shaders/agx_s2o3.slang`、`shaders/agx_hsv.slang` 或 `shaders/reinhard_gamut.slang` 后会分别自动热重载；编译失败时保留对应 DRT 的上一条有效管线。
 
-UI 用常驻按钮在 `None`、`Oklab`、`AgX-S2O3`、`AgX-HSV` 与 `Reinhard-Gamut` 间一键切换。所有路径共用 `-20..+20 EV` 曝光；`None` 仅执行 AP0 到 Rec.709 和 extended-sRGB 编码，不做 tone mapping，可作为显示参考，有限值按当前 SDR/HDR headroom 钳制；`0.5..2.0` 高光渐近值（默认 `1.0`）仅用于 Oklab。Oklab 在亮度映射后、色域 cusp 计算前主动重排高光 hue：黄、青、洋红是吸引轴，红、绿、蓝是保持不动的分界轴，压缩量按映射后的 Oklab lightness 从可调 onset 平滑增长到白端强度；默认 onset 为 40%，白端压缩为 80%。AgX-S2O3 与 AgX-HSV 拥有互不覆盖的 tone-scale 配置。S2O3 作为原始 SDR 参考，默认参数为 `-10/+6.5 EV`、输出中灰 `0.5`、枢轴对比度 `2.0`、toe/shoulder power `3.0/3.25` 和 gamut compression `0.2`。
+UI 用常驻按钮在 `None`、`Oklab`、`AgX-S2O3`、`AgX-HSV` 与 `Reinhard-Gamut` 间一键切换。所有路径共用 `-20..+20 EV` 曝光；`None` 仅执行 AP0 到 Rec.709 和 extended-sRGB 编码，不做 tone mapping，可作为显示参考，有限值按当前 SDR/HDR headroom 钳制；`0.5..2.0` 高光渐近值（默认 `1.0`）仅用于 Oklab。AgX-S2O3 与 AgX-HSV 拥有互不覆盖的 tone-scale 配置。S2O3 作为原始 SDR 参考，默认参数为 `-10/+6.5 EV`、输出中灰 `0.5`、枢轴对比度 `2.0`、toe/shoulder power `3.0/3.25` 和 gamut compression `0.2`。
 
 `Reinhard-Gamut` 是独立的统一 SDR/HDR 实验：AP0 转到线性 Rec.709 后，先把虚拟原色向外移动，使当前坐标按可调比例收缩到中性轴；默认虚拟色域扩张为 3%。每个扩张色域坐标在 18% 中灰以下使用穿过黑点和目标中灰的直线，中灰以上接入平移后的 Reinhard 双曲肩部；两段在中灰处的值和一阶导数连续。input scale `1/(1-0.18) = 1.2195122` 用于定义线性 0.18 的目标中灰。可调 Highlight reach `R` 表示中性灰输入在 `R` stops 后首次达到显示峰值，默认 `+6.5 EV`；曲线渐近值 `A` 与显示峰值 `H` 分离，并由中灰切线和 `f(0.18*2^(R+log2(H)))=H` 解析求解。因而 HDR 有效 reach 自动增加 `log2(H)`，默认 SDR 曲线的 `A` 约为 `1.044`，允许少量曲线过曝以减少中高调压缩、保留更强颜色，最终输出仍严格钳制到真实 headroom。缩短 reach 会增加过曝并更早剪切，提高 reach 则减弱过曝。曲线后使用解析逆变换还原到 Rec.709 并执行 extended-sRGB 编码；最后可在 extended-sRGB HSV 中按最短色相角向映射前色相回拉，全局保持度默认 50%，只修改 hue，保留映射结果的 saturation 与 value。
 

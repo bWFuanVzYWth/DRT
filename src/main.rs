@@ -14,7 +14,7 @@ use eframe::egui::{self, Color32, RichText, Vec2};
 
 use crate::distribution::{ColorSpace, DEFAULT_PITCH, DEFAULT_YAW, DistributionRenderer};
 use crate::file_browser::{FolderBrowser, Thumbnail, ThumbnailLoader};
-use crate::gpu::{AgxParameters, DrtGpu, DrtKind, OklabHueParameters, ReinhardParameters};
+use crate::gpu::{AgxParameters, DrtGpu, DrtKind, ReinhardParameters};
 use crate::presenter::{DisplayOutput, StartupOptions};
 use crate::tone_curve::ToneCurveRenderer;
 
@@ -53,7 +53,6 @@ struct DrtApp {
     gpu: DrtGpu,
     exposure_ev: f32,
     overexposure: f32,
-    oklab_hue_parameters: OklabHueParameters,
     agx_s2o3_parameters: AgxParameters,
     agx_hsv_parameters: AgxParameters,
     agx_black_hue_retention: f32,
@@ -132,7 +131,6 @@ impl DrtApp {
             gpu,
             exposure_ev: 0.0,
             overexposure: 1.0,
-            oklab_hue_parameters: OklabHueParameters::default(),
             agx_s2o3_parameters: AgxParameters::s2o3_reference(),
             agx_hsv_parameters: AgxParameters::hsv_default(),
             agx_black_hue_retention: 1.0,
@@ -512,47 +510,6 @@ impl DrtApp {
                 if exposure_changed || overexposure_changed {
                     self.gpu.set_parameters(self.exposure_ev, self.overexposure);
                 }
-                if self.gpu.active_drt() == DrtKind::Oklab {
-                    ui.separator();
-                    ui.label(RichText::new("Oklab highlight hue compression").strong());
-                    let mut hue_changed = ui
-                        .add(
-                            egui::Slider::new(
-                                &mut self.oklab_hue_parameters.white_compression,
-                                0.0..=1.0,
-                            )
-                            .step_by(0.01)
-                            .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
-                            .text("White compression"),
-                        )
-                        .on_hover_text(
-                            "Maximum active attraction toward the yellow, cyan, and magenta Oklab hue axes",
-                        )
-                        .changed();
-                    hue_changed |= ui
-                        .add(
-                            egui::Slider::new(&mut self.oklab_hue_parameters.onset, 0.0..=0.95)
-                                .step_by(0.01)
-                                .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
-                                .text("Highlight onset"),
-                        )
-                        .on_hover_text(
-                            "Mapped Oklab lightness where the active hue compression starts",
-                        )
-                        .changed();
-                    self.oklab_hue_parameters.constrain();
-                    ui.label(
-                        RichText::new(
-                            "Compression rises smoothly with mapped lightness; RGB primary axes stay fixed",
-                        )
-                        .small()
-                        .weak(),
-                    );
-                    if hue_changed {
-                        self.gpu
-                            .set_oklab_hue_parameters(self.oklab_hue_parameters);
-                    }
-                }
                 let active_drt = self.gpu.active_drt();
                 if active_drt == DrtKind::ReinhardGamut {
                     ui.separator();
@@ -842,7 +799,6 @@ impl DrtApp {
                 if ui.button("Reset parameters").clicked() {
                     self.exposure_ev = 0.0;
                     self.overexposure = 1.0;
-                    self.oklab_hue_parameters = OklabHueParameters::default();
                     self.agx_s2o3_parameters = AgxParameters::s2o3_reference();
                     self.agx_hsv_parameters = AgxParameters::hsv_default();
                     self.agx_black_hue_retention = 1.0;
@@ -850,8 +806,6 @@ impl DrtApp {
                     self.reinhard_parameters = ReinhardParameters::default();
                     self.show_anomalies = false;
                     self.gpu.set_parameters(self.exposure_ev, self.overexposure);
-                    self.gpu
-                        .set_oklab_hue_parameters(self.oklab_hue_parameters);
                     let active_agx_parameters = match self.gpu.active_drt() {
                         DrtKind::AgxS2O3 => Some(self.agx_s2o3_parameters),
                         DrtKind::AgxHsv => Some(self.agx_hsv_parameters),

@@ -84,28 +84,6 @@ struct DrtPipelines {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct OklabHueParameters {
-    pub white_compression: f32,
-    pub onset: f32,
-}
-
-impl Default for OklabHueParameters {
-    fn default() -> Self {
-        Self {
-            white_compression: 0.8,
-            onset: 0.4,
-        }
-    }
-}
-
-impl OklabHueParameters {
-    pub fn constrain(&mut self) {
-        self.white_compression = self.white_compression.clamp(0.0, 1.0);
-        self.onset = self.onset.clamp(0.0, 0.99);
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReinhardParameters {
     pub gamut_expansion: f32,
     pub input_scale: f32,
@@ -273,8 +251,7 @@ struct Parameters {
     agx_shoulder_a: f32,
     agx_black_hue_retention: f32,
     agx_white_hue_retention: f32,
-    oklab_white_hue_compression: f32,
-    oklab_hue_compression_onset: f32,
+    _padding_oklab: [u32; 2],
     agx_maximum_log_coordinate: f32,
     agx_output_peak: f32,
     reinhard_gamut_expansion: f32,
@@ -306,8 +283,7 @@ impl Parameters {
             agx_shoulder_a: 0.0,
             agx_black_hue_retention: 1.0,
             agx_white_hue_retention: 0.5,
-            oklab_white_hue_compression: 0.8,
-            oklab_hue_compression_onset: 0.4,
+            _padding_oklab: [0; 2],
             agx_maximum_log_coordinate: 1.0,
             agx_output_peak: 1.0,
             reinhard_gamut_expansion: ReinhardParameters::default().gamut_expansion,
@@ -615,18 +591,6 @@ impl DrtGpu {
         source.constrain();
         self.reinhard_parameters = source;
         self.apply_reinhard_parameters();
-        self.render_state.queue.write_buffer(
-            &self.uniform,
-            0,
-            bytemuck::bytes_of(&self.parameters),
-        );
-        self.dispatch();
-    }
-
-    pub fn set_oklab_hue_parameters(&mut self, mut source: OklabHueParameters) {
-        source.constrain();
-        self.parameters.oklab_white_hue_compression = source.white_compression;
-        self.parameters.oklab_hue_compression_onset = source.onset;
         self.render_state.queue.write_buffer(
             &self.uniform,
             0,
@@ -1118,56 +1082,10 @@ fn find_slangc() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgxParameters, DrtKind, OklabHueParameters, Parameters, ReinhardParameters,
-        curve_coefficient, curve_parameters, direct_output_headroom, extended_srgb_oetf,
+        AgxParameters, DrtKind, Parameters, ReinhardParameters, curve_coefficient,
+        curve_parameters, direct_output_headroom, extended_srgb_oetf,
     };
     use crate::tone_curve::SAMPLE_COUNT;
-
-    const PI: f32 = std::f32::consts::PI;
-    const TWO_PI: f32 = std::f32::consts::TAU;
-    const YELLOW: f32 = 1.915_834_5;
-    const GREEN: f32 = 2.487_012_9;
-    const CYAN: f32 = 3.399_359_5;
-    const BLUE: f32 = 4.608_577_3;
-    const MAGENTA: f32 = 5.731_023;
-    const RED_WRAPPED: f32 = 6.793_412_7;
-    const YELLOW_WRAPPED: f32 = 8.199_02;
-
-    fn warp_toward_lower(angle: f32, lower: f32, upper: f32, amount: f32) -> f32 {
-        let mut t = (angle - lower) / (upper - lower);
-        t -= amount * (PI * t).sin() / PI;
-        lower + (upper - lower) * t
-    }
-
-    fn warp_toward_upper(angle: f32, lower: f32, upper: f32, amount: f32) -> f32 {
-        let mut t = (angle - lower) / (upper - lower);
-        t += amount * (PI * t).sin() / PI;
-        lower + (upper - lower) * t
-    }
-
-    fn compress_oklab_hue(mut angle: f32, amount: f32) -> f32 {
-        if angle < YELLOW {
-            angle += TWO_PI;
-        }
-        if angle < GREEN {
-            warp_toward_lower(angle, YELLOW, GREEN, amount)
-        } else if angle < CYAN {
-            warp_toward_upper(angle, GREEN, CYAN, amount)
-        } else if angle < BLUE {
-            warp_toward_lower(angle, CYAN, BLUE, amount)
-        } else if angle < MAGENTA {
-            warp_toward_upper(angle, BLUE, MAGENTA, amount)
-        } else if angle < RED_WRAPPED {
-            warp_toward_lower(angle, MAGENTA, RED_WRAPPED, amount)
-        } else {
-            warp_toward_upper(angle, RED_WRAPPED, YELLOW_WRAPPED, amount)
-        }
-    }
-
-    fn highlight_hue_amount(lightness: f32, onset: f32, white_amount: f32) -> f32 {
-        let t = ((lightness - onset) / (1.0 - onset)).clamp(0.0, 1.0);
-        white_amount * t * t * (3.0 - 2.0 * t)
-    }
 
     fn to_expanded_gamut(color: [f32; 3], expansion: f32) -> [f32; 3] {
         let neutral = color[0] * 0.212_005_35 + color[1] * 0.392_182_5 + color[2] * 0.395_812_12;
@@ -1431,53 +1349,6 @@ mod tests {
             source.minimum_highlight_reach_ev()
         );
         assert_eq!(source.hue_retention, 1.0);
-    }
-
-    #[test]
-    fn default_oklab_hue_parameters_target_the_highlights() {
-        let source = OklabHueParameters::default();
-        let parameters = Parameters::new(1280, 720);
-
-        assert_eq!(source.white_compression, 0.8);
-        assert_eq!(source.onset, 0.4);
-        assert_eq!(parameters.overexposure, 1.0);
-        assert_eq!(parameters.oklab_white_hue_compression, 0.8);
-        assert_eq!(parameters.oklab_hue_compression_onset, 0.4);
-        assert_eq!(
-            highlight_hue_amount(0.4, source.onset, source.white_compression),
-            0.0
-        );
-        assert_eq!(
-            highlight_hue_amount(1.0, source.onset, source.white_compression),
-            0.8
-        );
-    }
-
-    #[test]
-    fn oklab_hue_compression_keeps_rgb_and_cmy_axes_fixed() {
-        for angle in [YELLOW, GREEN, CYAN, BLUE, MAGENTA, RED_WRAPPED] {
-            assert!((compress_oklab_hue(angle, 1.0) - angle).abs() < 2.0e-6);
-        }
-
-        let yellow_side = 0.5 * (YELLOW + GREEN);
-        let cyan_side = 0.5 * (GREEN + CYAN);
-        let magenta_side = 0.5 * (BLUE + MAGENTA);
-        assert!(compress_oklab_hue(yellow_side, 0.5) < yellow_side);
-        assert!(compress_oklab_hue(cyan_side, 0.5) > cyan_side);
-        assert!(compress_oklab_hue(magenta_side, 0.5) > magenta_side);
-    }
-
-    #[test]
-    fn oklab_hue_compression_does_not_fold_the_hue_circle() {
-        for amount in [0.0, 0.5, 1.0] {
-            let mut previous = compress_oklab_hue(YELLOW, amount);
-            for index in 1..=4096 {
-                let angle = YELLOW + TWO_PI * index as f32 / 4096.0;
-                let mapped = compress_oklab_hue(angle, amount);
-                assert!(mapped + 2.0e-6 >= previous);
-                previous = mapped;
-            }
-        }
     }
 
     #[test]
