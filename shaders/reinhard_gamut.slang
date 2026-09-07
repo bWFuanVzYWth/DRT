@@ -24,12 +24,12 @@ struct DrtParameters
     float agxShoulderA;
     float agxBlackHueRetention;
     float agxWhiteHueRetention;
-    uint paddingOklab0;
-    uint paddingOklab1;
+    uint oklabReinhardCurve;
+    float reinhardCompressionStart;
     float agxMaximumLogCoordinate;
     float agxOutputPeak;
     float reinhardGamutExpansion;
-    float reinhardMiddleGray;
+    float reinhardLinearSlope;
     float reinhardOutputPeak;
     float reinhardHueRetention;
     float reinhardCurvePeak;
@@ -75,18 +75,20 @@ float3 fromExpandedGamutCoordinates(float3 color)
 
 float3 reinhard(float3 color)
 {
-    float linearSlope = parameters.reinhardMiddleGray / 0.18;
-    float shoulderExtent = parameters.reinhardCurvePeak
-        - parameters.reinhardMiddleGray;
-    float3 distance = color - 0.18;
+    float linearSlope = parameters.reinhardLinearSlope;
+    float compressionStart = parameters.reinhardCompressionStart;
+    float startOutput = linearSlope * compressionStart;
+    float shoulderExtent = parameters.reinhardCurvePeak - startOutput;
+    // The shoulder is unused below the join; keep its denominator positive there.
+    float3 distance = max(color - compressionStart, 0.0);
     float3 tangentDistance = linearSlope * distance;
     float3 linear = linearSlope * color;
-    float3 shoulder = parameters.reinhardMiddleGray
+    float3 shoulder = startOutput
         + tangentDistance / (1.0 + tangentDistance / shoulderExtent);
     return float3(
-        color.x <= 0.18 ? linear.x : shoulder.x,
-        color.y <= 0.18 ? linear.y : shoulder.y,
-        color.z <= 0.18 ? linear.z : shoulder.z);
+        color.x <= compressionStart ? linear.x : shoulder.x,
+        color.y <= compressionStart ? linear.y : shoulder.y,
+        color.z <= compressionStart ? linear.z : shoulder.z);
 }
 
 float3 encodeSrgb(float3 linearRgb)

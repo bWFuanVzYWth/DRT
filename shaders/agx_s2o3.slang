@@ -25,12 +25,12 @@ struct DrtParameters
     float agxShoulderA;
     float agxBlackHueRetention;
     float agxWhiteHueRetention;
-    uint paddingOklab0;
-    uint paddingOklab1;
+    uint oklabReinhardCurve;
+    float reinhardCompressionStart;
     float agxMaximumLogCoordinate;
     float agxOutputPeak;
     float reinhardGamutExpansion;
-    float reinhardMiddleGray;
+    float reinhardLinearSlope;
     float reinhardOutputPeak;
     float reinhardHueRetention;
     float reinhardCurvePeak;

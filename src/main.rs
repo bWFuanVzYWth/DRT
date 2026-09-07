@@ -53,10 +53,12 @@ struct DrtApp {
     gpu: DrtGpu,
     exposure_ev: f32,
     overexposure: f32,
+    oklab_reinhard_curve: bool,
     agx_s2o3_parameters: AgxParameters,
     agx_hsv_parameters: AgxParameters,
     agx_black_hue_retention: f32,
     agx_white_hue_retention: f32,
+    oklab_reinhard_parameters: ReinhardParameters,
     reinhard_parameters: ReinhardParameters,
     show_anomalies: bool,
     image_name: String,
@@ -131,10 +133,12 @@ impl DrtApp {
             gpu,
             exposure_ev: 0.0,
             overexposure: 1.0,
+            oklab_reinhard_curve: false,
             agx_s2o3_parameters: AgxParameters::s2o3_reference(),
             agx_hsv_parameters: AgxParameters::hsv_default(),
             agx_black_hue_retention: 1.0,
             agx_white_hue_retention: 0.5,
+            oklab_reinhard_parameters: ReinhardParameters::oklab_default(),
             reinhard_parameters: ReinhardParameters::default(),
             show_anomalies: initial_show_anomalies,
             image_name,
@@ -500,7 +504,18 @@ impl DrtApp {
                             .suffix(" EV"),
                     )
                     .changed();
-                let overexposure_changed = if self.gpu.active_drt() == DrtKind::Oklab {
+                let active_drt = self.gpu.active_drt();
+                if active_drt == DrtKind::Oklab
+                    && ui
+                        .checkbox(&mut self.oklab_reinhard_curve, "Reinhard piecewise curve")
+                        .on_hover_text(
+                            "Use Reinhard-Gamut's linear toe and shoulder for Oklab lightness; uncheck to use the original curve",
+                        )
+                        .changed()
+                {
+                    self.gpu.set_oklab_reinhard_curve(self.oklab_reinhard_curve);
+                }
+                let overexposure_changed = if active_drt == DrtKind::Oklab && !self.oklab_reinhard_curve {
                     ui.label("Highlight asymptote");
                     ui.add(egui::Slider::new(&mut self.overexposure, 0.5..=2.0).step_by(0.05))
                         .changed()
@@ -510,43 +525,74 @@ impl DrtApp {
                 if exposure_changed || overexposure_changed {
                     self.gpu.set_parameters(self.exposure_ev, self.overexposure);
                 }
-                let active_drt = self.gpu.active_drt();
-                if active_drt == DrtKind::ReinhardGamut {
+                if active_drt == DrtKind::ReinhardGamut
+                    || (active_drt == DrtKind::Oklab && self.oklab_reinhard_curve)
+                {
+                    let mut reinhard_parameters = if active_drt == DrtKind::Oklab {
+                        self.oklab_reinhard_parameters
+                    } else {
+                        self.reinhard_parameters
+                    };
                     ui.separator();
-                    ui.label(RichText::new("Reinhard gamut experiment").strong());
-                    let mut reinhard_changed = ui
-                        .add(
-                            egui::Slider::new(
-                                &mut self.reinhard_parameters.gamut_expansion,
-                                0.0..=0.8,
+                    let mut reinhard_changed = false;
+                    if active_drt == DrtKind::ReinhardGamut {
+                        ui.label(RichText::new("Reinhard gamut experiment").strong());
+                        reinhard_changed |= ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut reinhard_parameters.gamut_expansion,
+                                    0.0..=0.8,
+                                )
+                                .step_by(0.01)
+                                .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
+                                .text("Virtual gamut expansion"),
                             )
-                            .step_by(0.01)
-                            .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
-                            .text("Virtual gamut expansion"),
-                        )
-                        .on_hover_text(
-                            "Moves the virtual primaries outward, so Rec.709 coordinates contract toward the neutral axis before Reinhard",
-                        )
-                        .changed();
+                            .on_hover_text(
+                                "Moves the virtual primaries outward, so Rec.709 coordinates contract toward the neutral axis before Reinhard",
+                            )
+                            .changed();
+                    } else {
+                        ui.label(RichText::new("Oklab Reinhard curve").strong());
+                        ui.label(
+                            RichText::new("Oklab has independent curve settings and uses the SDR range.")
+                                .small()
+                                .weak(),
+                        );
+                    }
                     reinhard_changed |= ui
                         .add(
                             egui::Slider::new(
-                                &mut self.reinhard_parameters.input_scale,
+                                &mut reinhard_parameters.input_scale,
                                 0.1..=8.0,
                             )
                             .step_by(0.01)
                             .text("Reinhard input scale"),
                         )
                         .on_hover_text(
-                            "Defines the target 18% gray output; Highlight reach and HDR headroom determine the effective curve scale",
+                            "Defines the linear segment's slope using 18% gray; gray is compressed when Compression start is below 0.18",
                         )
                         .changed();
-                    self.reinhard_parameters.constrain();
-                    let minimum_reach = self.reinhard_parameters.minimum_highlight_reach_ev();
+                    reinhard_parameters.constrain();
+                    let maximum_start = reinhard_parameters.maximum_compression_start();
                     reinhard_changed |= ui
                         .add(
                             egui::Slider::new(
-                                &mut self.reinhard_parameters.highlight_reach_ev,
+                                &mut reinhard_parameters.compression_start,
+                                0.0..=maximum_start,
+                            )
+                            .step_by(0.001)
+                            .max_decimals(3)
+                            .text("Compression start"),
+                        )
+                        .on_hover_text(
+                            "Scene-linear input where the straight segment joins the Reinhard shoulder; default 0.18 for Oklab and 0.5 for Reinhard-Gamut. The maximum keeps the join below SDR white",
+                        )
+                        .changed();
+                    let minimum_reach = reinhard_parameters.minimum_highlight_reach_ev();
+                    reinhard_changed |= ui
+                        .add(
+                            egui::Slider::new(
+                                &mut reinhard_parameters.highlight_reach_ev,
                                 minimum_reach..=20.0,
                             )
                             .step_by(0.25)
@@ -557,29 +603,34 @@ impl DrtApp {
                             "Scene stops above 18% gray that first reach the display peak; shorter reach permits more curve overexposure and preserves stronger mid-highlight color",
                         )
                         .changed();
-                    reinhard_changed |= ui
-                        .add(
-                            egui::Slider::new(
-                                &mut self.reinhard_parameters.hue_retention,
-                                0.0..=1.0,
+                    if active_drt == DrtKind::ReinhardGamut {
+                        reinhard_changed |= ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut reinhard_parameters.hue_retention,
+                                    0.0..=1.0,
+                                )
+                                .step_by(0.01)
+                                .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
+                                .text("HSV hue retention"),
                             )
-                            .step_by(0.01)
-                            .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
-                            .text("HSV hue retention"),
-                        )
-                        .on_hover_text(
-                            "Moves the mapped hue toward the original sRGB hue along the shortest angular path; mapped saturation and value stay unchanged",
-                        )
-                        .changed();
-                    self.reinhard_parameters.constrain();
-                    let curve = self
-                        .reinhard_parameters
-                        .curve_for_headroom(self.gpu.output_headroom());
+                            .on_hover_text(
+                                "Moves the mapped hue toward the original sRGB hue along the shortest angular path; mapped saturation and value stay unchanged",
+                            )
+                            .changed();
+                    }
+                    reinhard_parameters.constrain();
+                    let curve_headroom = if active_drt == DrtKind::ReinhardGamut {
+                        self.gpu.output_headroom()
+                    } else {
+                        1.0
+                    };
+                    let curve = reinhard_parameters.curve_for_headroom(curve_headroom);
                     ui.label(
                         RichText::new(format!(
                             "18% gray → {:.3} · SDR reach {:+.2} EV · effective reach {:+.2} EV",
-                            self.reinhard_parameters.mapped_middle_gray(),
-                            self.reinhard_parameters.highlight_reach_ev,
+                            curve.map_linear(0.18),
+                            reinhard_parameters.highlight_reach_ev,
                             curve.highlight_reach_ev,
                         ))
                         .small()
@@ -589,7 +640,7 @@ impl DrtApp {
                         RichText::new(format!(
                             "Curve asymptote {:.3}× · display clamp {:.3}× · linear slope {:.3} · shoulder rate {:.3}",
                             curve.curve_peak,
-                            self.gpu.output_headroom(),
+                            curve_headroom,
                             curve.linear_slope,
                             curve.shoulder_scale,
                         ))
@@ -597,8 +648,13 @@ impl DrtApp {
                         .weak(),
                     );
                     if reinhard_changed {
-                        self.gpu
-                            .set_reinhard_parameters(self.reinhard_parameters);
+                        if active_drt == DrtKind::Oklab {
+                            self.oklab_reinhard_parameters = reinhard_parameters;
+                            self.gpu.set_oklab_reinhard_parameters(reinhard_parameters);
+                        } else {
+                            self.reinhard_parameters = reinhard_parameters;
+                            self.gpu.set_reinhard_parameters(reinhard_parameters);
+                        }
                     }
                 }
                 if active_drt.uses_agx() {
@@ -799,13 +855,16 @@ impl DrtApp {
                 if ui.button("Reset parameters").clicked() {
                     self.exposure_ev = 0.0;
                     self.overexposure = 1.0;
+                    self.oklab_reinhard_curve = false;
                     self.agx_s2o3_parameters = AgxParameters::s2o3_reference();
                     self.agx_hsv_parameters = AgxParameters::hsv_default();
                     self.agx_black_hue_retention = 1.0;
                     self.agx_white_hue_retention = 0.5;
+                    self.oklab_reinhard_parameters = ReinhardParameters::oklab_default();
                     self.reinhard_parameters = ReinhardParameters::default();
                     self.show_anomalies = false;
                     self.gpu.set_parameters(self.exposure_ev, self.overexposure);
+                    self.gpu.set_oklab_reinhard_curve(self.oklab_reinhard_curve);
                     let active_agx_parameters = match self.gpu.active_drt() {
                         DrtKind::AgxS2O3 => Some(self.agx_s2o3_parameters),
                         DrtKind::AgxHsv => Some(self.agx_hsv_parameters),
@@ -818,6 +877,8 @@ impl DrtApp {
                         self.agx_black_hue_retention,
                         self.agx_white_hue_retention,
                     );
+                    self.gpu
+                        .set_oklab_reinhard_parameters(self.oklab_reinhard_parameters);
                     self.gpu
                         .set_reinhard_parameters(self.reinhard_parameters);
                     self.gpu.set_show_anomalies(false);

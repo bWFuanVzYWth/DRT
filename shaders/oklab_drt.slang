@@ -24,12 +24,12 @@ struct DrtParameters
     float agxShoulderA;
     float agxBlackHueRetention;
     float agxWhiteHueRetention;
-    uint paddingOklab0;
-    uint paddingOklab1;
+    uint oklabReinhardCurve;
+    float reinhardCompressionStart;
     float agxMaximumLogCoordinate;
     float agxOutputPeak;
     float reinhardGamutExpansion;
-    float reinhardMiddleGray;
+    float reinhardLinearSlope;
     float reinhardOutputPeak;
     float reinhardHueRetention;
     float reinhardCurvePeak;
@@ -93,6 +93,27 @@ float shoulderCoefficient(float overexposure)
 float mapLightness(float lightness, float overexposure)
 {
     float brightness = lightness * lightness * lightness;
+    if (parameters.oklabReinhardCurve != 0)
+    {
+        // Match Reinhard-Gamut's linear toe and tangent-continuous shoulder
+        // in L^3, then return to Oklab lightness for the existing gamut mapping.
+        float linearSlope = parameters.reinhardLinearSlope;
+        float compressionStart = parameters.reinhardCompressionStart;
+        float mappedBrightness;
+        if (brightness <= compressionStart)
+        {
+            mappedBrightness = linearSlope * brightness;
+        }
+        else
+        {
+            float startOutput = linearSlope * compressionStart;
+            float shoulderExtent = parameters.reinhardCurvePeak - startOutput;
+            float tangentDistance = linearSlope * (brightness - compressionStart);
+            mappedBrightness = startOutput
+                + tangentDistance / (1.0 + tangentDistance / shoulderExtent);
+        }
+        return pow(mappedBrightness, 1.0 / 3.0);
+    }
     float x = shoulderCoefficient(overexposure) * brightness;
     float inverseRoot = rsqrt(1.0 + x);
     float mappedBrightness = overexposure * x * inverseRoot * inverseRoot / (1.0 + inverseRoot);
