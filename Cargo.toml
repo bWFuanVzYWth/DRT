@@ -2,7 +2,7 @@
 name = "drt"
 version = "0.1.0"
 edition = "2024"
-description = "DRT development bench for Oklab and AgX-S2O3, built on wgpu 30 and Slang 2025.13+"
+description = "Interactive workbench for developing, debugging, and comparing display rendering transforms"
 publish = false
 
 [dependencies]
@@ -14,5 +14,5 @@ image = { version = "0.25.6", default-features = false, features = ["exr", "hdr"
 half = { version = "2.7", features = ["bytemuck"] }
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 pollster = "0.4"
-wgpu = { version = "30.0.0", features = ["spirv"] }
+wgpu = "30.0.0"
 winit = { version = "0.30.13", features = ["rwh_06"] }

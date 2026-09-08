@@ -52,8 +52,6 @@ fn main() -> anyhow::Result<()> {
 struct DrtApp {
     gpu: DrtGpu,
     exposure_ev: f32,
-    overexposure: f32,
-    oklab_reinhard_curve: bool,
     agx_s2o3_parameters: AgxParameters,
     agx_hsv_parameters: AgxParameters,
     agx_black_hue_retention: f32,
@@ -132,8 +130,6 @@ impl DrtApp {
         Ok(Self {
             gpu,
             exposure_ev: 0.0,
-            overexposure: 1.0,
-            oklab_reinhard_curve: false,
             agx_s2o3_parameters: AgxParameters::s2o3_reference(),
             agx_hsv_parameters: AgxParameters::hsv_default(),
             agx_black_hue_retention: 1.0,
@@ -275,10 +271,7 @@ impl DrtApp {
         self.shader_modified[drt.index()] = modified_time(&shader_path);
         match result {
             Ok(()) => {
-                self.set_status(
-                    format!("{} Slang to SPIR-V hot reload succeeded", drt.label()),
-                    false,
-                );
+                self.set_status(format!("{} WGSL hot reload succeeded", drt.label()), false);
             }
             Err(error) => self.set_status(
                 format!("Shader compilation failed; keeping the last valid pipeline: {error:#}"),
@@ -352,11 +345,7 @@ impl DrtApp {
                     "Image + Distribution",
                 );
                 ui.separator();
-                ui.label(
-                    RichText::new("wgpu 30 · Slang 2025.13+ · egui 0.36")
-                        .monospace()
-                        .weak(),
-                );
+                ui.label(RichText::new("wgpu · WGSL · egui").monospace().weak());
             });
         });
 
@@ -505,29 +494,10 @@ impl DrtApp {
                     )
                     .changed();
                 let active_drt = self.gpu.active_drt();
-                if active_drt == DrtKind::Oklab
-                    && ui
-                        .checkbox(&mut self.oklab_reinhard_curve, "Reinhard piecewise curve")
-                        .on_hover_text(
-                            "Use Reinhard-Gamut's linear toe and shoulder for Oklab lightness; uncheck to use the original curve",
-                        )
-                        .changed()
-                {
-                    self.gpu.set_oklab_reinhard_curve(self.oklab_reinhard_curve);
+                if exposure_changed {
+                    self.gpu.set_exposure(self.exposure_ev);
                 }
-                let overexposure_changed = if active_drt == DrtKind::Oklab && !self.oklab_reinhard_curve {
-                    ui.label("Highlight asymptote");
-                    ui.add(egui::Slider::new(&mut self.overexposure, 0.5..=2.0).step_by(0.05))
-                        .changed()
-                } else {
-                    false
-                };
-                if exposure_changed || overexposure_changed {
-                    self.gpu.set_parameters(self.exposure_ev, self.overexposure);
-                }
-                if active_drt == DrtKind::ReinhardGamut
-                    || (active_drt == DrtKind::Oklab && self.oklab_reinhard_curve)
-                {
+                if matches!(active_drt, DrtKind::ReinhardGamut | DrtKind::Oklab) {
                     let mut reinhard_parameters = if active_drt == DrtKind::Oklab {
                         self.oklab_reinhard_parameters
                     } else {
@@ -854,8 +824,6 @@ impl DrtApp {
                 }
                 if ui.button("Reset parameters").clicked() {
                     self.exposure_ev = 0.0;
-                    self.overexposure = 1.0;
-                    self.oklab_reinhard_curve = false;
                     self.agx_s2o3_parameters = AgxParameters::s2o3_reference();
                     self.agx_hsv_parameters = AgxParameters::hsv_default();
                     self.agx_black_hue_retention = 1.0;
@@ -863,8 +831,7 @@ impl DrtApp {
                     self.oklab_reinhard_parameters = ReinhardParameters::oklab_default();
                     self.reinhard_parameters = ReinhardParameters::default();
                     self.show_anomalies = false;
-                    self.gpu.set_parameters(self.exposure_ev, self.overexposure);
-                    self.gpu.set_oklab_reinhard_curve(self.oklab_reinhard_curve);
+                    self.gpu.set_exposure(self.exposure_ev);
                     let active_agx_parameters = match self.gpu.active_drt() {
                         DrtKind::AgxS2O3 => Some(self.agx_s2o3_parameters),
                         DrtKind::AgxHsv => Some(self.agx_hsv_parameters),

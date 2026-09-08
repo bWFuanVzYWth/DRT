@@ -1,8 +1,4 @@
-use std::{
-    env,
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use bytemuck::{Pod, Zeroable};
@@ -15,12 +11,11 @@ use crate::{
     tone_curve::{INPUT_MAX_EV, INPUT_MIN_EV, SAMPLE_COUNT, ToneCurveRenderer},
 };
 
-const BUILT_OKLAB_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/oklab_drt.spv"));
-const BUILT_AGX_S2O3_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/agx_s2o3.spv"));
-const BUILT_AGX_HSV_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/agx_hsv.spv"));
-const BUILT_REINHARD_GAMUT_SHADER: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/reinhard_gamut.spv"));
-const BUILT_NONE_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/none_drt.spv"));
+const BUILT_OKLAB_SHADER: &str = include_str!("../shaders/oklab_drt.wgsl");
+const BUILT_AGX_S2O3_SHADER: &str = include_str!("../shaders/agx_s2o3.wgsl");
+const BUILT_AGX_HSV_SHADER: &str = include_str!("../shaders/agx_hsv.wgsl");
+const BUILT_REINHARD_GAMUT_SHADER: &str = include_str!("../shaders/reinhard_gamut.wgsl");
+const BUILT_NONE_SHADER: &str = include_str!("../shaders/none_drt.wgsl");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DrtKind {
@@ -52,11 +47,11 @@ impl DrtKind {
 
     pub fn shader_file(self) -> &'static str {
         match self {
-            Self::None => "none_drt.slang",
-            Self::Oklab => "oklab_drt.slang",
-            Self::AgxS2O3 => "agx_s2o3.slang",
-            Self::AgxHsv => "agx_hsv.slang",
-            Self::ReinhardGamut => "reinhard_gamut.slang",
+            Self::None => "none_drt.wgsl",
+            Self::Oklab => "oklab_drt.wgsl",
+            Self::AgxS2O3 => "agx_s2o3.wgsl",
+            Self::AgxHsv => "agx_hsv.wgsl",
+            Self::ReinhardGamut => "reinhard_gamut.wgsl",
         }
     }
 
@@ -268,11 +263,9 @@ impl AgxParameters {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Parameters {
     exposure_multiplier: f32,
-    overexposure: f32,
     width: u32,
     height: u32,
     show_anomalies: u32,
-    _padding: [u32; 3],
     agx_minimum_log2: f32,
     agx_inverse_dynamic_range: f32,
     agx_input_pivot: f32,
@@ -285,7 +278,6 @@ struct Parameters {
     agx_shoulder_a: f32,
     agx_black_hue_retention: f32,
     agx_white_hue_retention: f32,
-    oklab_reinhard_curve: u32,
     reinhard_compression_start: f32,
     agx_maximum_log_coordinate: f32,
     agx_output_peak: f32,
@@ -294,18 +286,15 @@ struct Parameters {
     reinhard_output_peak: f32,
     reinhard_hue_retention: f32,
     reinhard_curve_peak: f32,
-    _padding4: [u32; 3],
 }
 
 impl Parameters {
     fn new(width: u32, height: u32) -> Self {
         let mut parameters = Self {
             exposure_multiplier: 1.0,
-            overexposure: 1.0,
             width,
             height,
             show_anomalies: 0,
-            _padding: [0; 3],
             agx_minimum_log2: 0.0,
             agx_inverse_dynamic_range: 0.0,
             agx_input_pivot: 0.0,
@@ -318,7 +307,6 @@ impl Parameters {
             agx_shoulder_a: 0.0,
             agx_black_hue_retention: 1.0,
             agx_white_hue_retention: 0.5,
-            oklab_reinhard_curve: 0,
             reinhard_compression_start: ReinhardParameters::default().compression_start,
             agx_maximum_log_coordinate: 1.0,
             agx_output_peak: 1.0,
@@ -327,7 +315,6 @@ impl Parameters {
             reinhard_output_peak: 1.0,
             reinhard_hue_retention: ReinhardParameters::default().hue_retention,
             reinhard_curve_peak: 1.0,
-            _padding4: [0; 3],
         };
         parameters.set_agx(AgxParameters::default());
         parameters.set_reinhard_for_headroom(ReinhardParameters::default(), 1.0);
@@ -593,9 +580,8 @@ impl DrtGpu {
         Ok(())
     }
 
-    pub fn set_parameters(&mut self, exposure_ev: f32, overexposure: f32) {
+    pub fn set_exposure(&mut self, exposure_ev: f32) {
         self.parameters.exposure_multiplier = 2.0_f32.powf(exposure_ev);
-        self.parameters.overexposure = overexposure;
         self.render_state.queue.write_buffer(
             &self.uniform,
             0,
@@ -607,16 +593,6 @@ impl DrtGpu {
     pub fn set_agx_parameters(&mut self, parameters: AgxParameters) {
         self.agx_parameters = parameters;
         self.apply_agx_parameters();
-        self.render_state.queue.write_buffer(
-            &self.uniform,
-            0,
-            bytemuck::bytes_of(&self.parameters),
-        );
-        self.dispatch();
-    }
-
-    pub fn set_oklab_reinhard_curve(&mut self, enabled: bool) {
-        self.parameters.oklab_reinhard_curve = u32::from(enabled);
         self.render_state.queue.write_buffer(
             &self.uniform,
             0,
@@ -705,22 +681,16 @@ impl DrtGpu {
     }
 
     pub fn reload_shader(&mut self, drt: DrtKind, source: &Path) -> Result<()> {
-        let temporary = std::env::temp_dir().join(format!(
-            "drt-{}-{}.spv",
-            drt.shader_file().trim_end_matches(".slang"),
-            std::process::id()
-        ));
-        compile_slang(source, &temporary)?;
-        let bytes = std::fs::read(&temporary)
-            .with_context(|| format!("cannot read {}", temporary.display()))?;
-        let _ = std::fs::remove_file(&temporary);
+        let shader = std::fs::read_to_string(source)
+            .with_context(|| format!("cannot read {}", source.display()))?;
 
         let next = create_pipeline(
             &self.render_state.device,
             &self.pipeline_layout,
-            &bytes,
+            &shader,
             drt.label(),
-        )?;
+        )
+        .with_context(|| format!("cannot reload {}", source.display()))?;
         match drt {
             DrtKind::None => self.pipelines.none = next,
             DrtKind::Oklab => self.pipelines.oklab = next,
@@ -873,13 +843,13 @@ fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
 fn create_pipeline(
     device: &wgpu::Device,
     pipeline_layout: &wgpu::PipelineLayout,
-    spirv: &[u8],
+    source: &str,
     label: &str,
 ) -> Result<wgpu::ComputePipeline> {
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(label),
-        source: wgpu::util::make_spirv(spirv),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
     });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some(label),
@@ -890,7 +860,7 @@ fn create_pipeline(
         cache: None,
     });
     if let Some(error) = pollster::block_on(scope.pop()) {
-        bail!("wgpu rejected the SPIR-V pipeline: {error}");
+        bail!("wgpu rejected the WGSL pipeline: {error}");
     }
     Ok(pipeline)
 }
@@ -1097,67 +1067,9 @@ fn create_curve_resources(
     }
 }
 
-fn compile_slang(source: &Path, output: &Path) -> Result<()> {
-    let slangc = find_slangc();
-    let result = Command::new(&slangc)
-        .args([
-            source.as_os_str(),
-            "-entry".as_ref(),
-            "main".as_ref(),
-            "-stage".as_ref(),
-            "compute".as_ref(),
-            "-target".as_ref(),
-            "spirv".as_ref(),
-            "-profile".as_ref(),
-            "glsl_460".as_ref(),
-            "-capability".as_ref(),
-            "SPIRV_1_3".as_ref(),
-            "-matrix-layout-row-major".as_ref(),
-            "-O2".as_ref(),
-            "-o".as_ref(),
-            output.as_os_str(),
-        ])
-        .output()
-        .with_context(|| format!("cannot launch {:?}", slangc))?;
-    if !result.status.success() {
-        bail!(
-            "{}{}",
-            String::from_utf8_lossy(&result.stdout),
-            String::from_utf8_lossy(&result.stderr)
-        );
-    }
-    Ok(())
-}
-
-fn find_slangc() -> PathBuf {
-    if let Some(path) = env::var_os("SLANGC") {
-        return PathBuf::from(path);
-    }
-
-    let executable = if cfg!(windows) {
-        "slangc.exe"
-    } else {
-        "slangc"
-    };
-    if let Some(path) = env::var_os("PATH").and_then(|path| {
-        env::split_paths(&path).find_map(|directory| {
-            let candidate = directory.join(executable);
-            candidate.is_file().then_some(candidate)
-        })
-    }) {
-        return path;
-    }
-
-    if let Some(sdk) = env::var_os("VULKAN_SDK") {
-        let bin = if cfg!(windows) { "Bin" } else { "bin" };
-        let candidate = PathBuf::from(sdk).join(bin).join(executable);
-        if candidate.is_file() {
-            return candidate;
-        }
-    }
-
-    PathBuf::from(executable)
-}
+#[cfg(test)]
+#[path = "gpu_validation.rs"]
+mod validation;
 
 #[cfg(test)]
 mod tests {
@@ -1271,8 +1183,6 @@ mod tests {
         let mut image_parameters = Parameters::new(3840, 2160);
         image_parameters.exposure_multiplier = 32.0;
         image_parameters.show_anomalies = 1;
-        image_parameters.overexposure = 1.35;
-        image_parameters.oklab_reinhard_curve = 1;
         image_parameters.set_agx_for_headroom(AgxParameters::hsv_default(), 4.0);
         image_parameters.set_reinhard_for_headroom(
             ReinhardParameters {
@@ -1287,11 +1197,6 @@ mod tests {
         assert_eq!(curve.height, 1);
         assert_eq!(curve.exposure_multiplier, 1.0);
         assert_eq!(curve.show_anomalies, 0);
-        assert_eq!(curve.overexposure, image_parameters.overexposure);
-        assert_eq!(
-            curve.oklab_reinhard_curve,
-            image_parameters.oklab_reinhard_curve
-        );
         assert_eq!(curve.agx_output_peak, image_parameters.agx_output_peak);
         assert_eq!(curve.agx_shoulder_a, image_parameters.agx_shoulder_a);
         assert_eq!(
@@ -1340,7 +1245,7 @@ mod tests {
         assert_eq!(parameters.reinhard_hue_retention, 0.75);
         assert_eq!(parameters.reinhard_curve_peak, curve.curve_peak);
         assert!(curve.curve_peak > 1.001 && curve.curve_peak < 1.002);
-        assert_eq!(std::mem::size_of::<Parameters>(), 128);
+        assert_eq!(std::mem::size_of::<Parameters>(), 96);
     }
 
     #[test]
