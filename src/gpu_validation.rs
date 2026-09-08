@@ -160,12 +160,13 @@ impl TestGpu {
 fn drt_gpu_outputs() {
     let gpu = TestGpu::new();
     let image = crate::image_io::test_pattern(63, 9);
-    let shaders = [
+    let shaders: [&str; DrtKind::ALL.len()] = [
         BUILT_NONE_SHADER,
         BUILT_OKLAB_SHADER,
         BUILT_AGX_S2O3_SHADER,
         BUILT_AGX_HSV_SHADER,
         BUILT_REINHARD_GAMUT_SHADER,
+        BUILT_REINHARD_AGX_SHADER,
     ];
     for (drt, shader) in DrtKind::ALL.into_iter().zip(shaders) {
         let pipeline = create_pipeline(&gpu.device, &gpu.layout, shader, drt.label()).unwrap();
@@ -198,11 +199,24 @@ fn drt_gpu_outputs() {
                     1.0
                 },
             );
+            let hybrid = if variant >= 3 {
+                ReinhardAgxParameters {
+                    base: reinhard,
+                    shoulder_power: 1.5,
+                }
+            } else {
+                ReinhardAgxParameters::default()
+            };
+            if drt == DrtKind::ReinhardAgx {
+                parameters.set_reinhard_agx_for_headroom(hybrid, headroom);
+            }
             let pixels = gpu.render(&pipeline, parameters, &image.rgba);
             assert!(pixels.iter().all(|v| v.is_finite() && *v >= 0.0));
             assert!(pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 1.0));
             let peak = match drt {
-                DrtKind::None | DrtKind::ReinhardGamut => extended_srgb_oetf(headroom),
+                DrtKind::None | DrtKind::ReinhardGamut | DrtKind::ReinhardAgx => {
+                    extended_srgb_oetf(headroom)
+                }
                 DrtKind::AgxHsv => parameters.agx_output_peak,
                 _ => 1.0,
             };
@@ -240,6 +254,24 @@ fn drt_gpu_outputs() {
                     );
                 }
             }
+            if drt == DrtKind::ReinhardAgx {
+                let curve = hybrid.curve_for_headroom(headroom);
+                for (pixel, input) in ramp
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(image.rgba.as_chunks::<4>().0)
+                {
+                    let value =
+                        half::f16::from_f32(input[0]).to_f32() * parameters.exposure_multiplier;
+                    let expected = extended_srgb_oetf(curve.map_linear(value).clamp(0.0, headroom));
+                    assert!(
+                        (pixel[0] - expected).abs() < 0.003 * peak,
+                        "Reinhard AgX: expected {expected}, got {}",
+                        pixel[0]
+                    );
+                }
+            }
             assert!(
                 ramp.as_chunks::<4>()
                     .0
@@ -252,7 +284,7 @@ fn drt_gpu_outputs() {
             if headroom > 1.0
                 && matches!(
                     drt,
-                    DrtKind::None | DrtKind::AgxHsv | DrtKind::ReinhardGamut
+                    DrtKind::None | DrtKind::AgxHsv | DrtKind::ReinhardGamut | DrtKind::ReinhardAgx
                 )
             {
                 assert!(
@@ -269,12 +301,13 @@ fn drt_gpu_outputs() {
 #[ignore = "requires a GPU; run with --ignored --nocapture"]
 fn drt_gpu_diagnostics() {
     let gpu = TestGpu::new();
-    let shaders = [
+    let shaders: [&str; DrtKind::ALL.len()] = [
         BUILT_NONE_SHADER,
         BUILT_OKLAB_SHADER,
         BUILT_AGX_S2O3_SHADER,
         BUILT_AGX_HSV_SHADER,
         BUILT_REINHARD_GAMUT_SHADER,
+        BUILT_REINHARD_AGX_SHADER,
     ];
     for (drt, shader) in DrtKind::ALL.into_iter().zip(shaders) {
         let pipeline = create_pipeline(&gpu.device, &gpu.layout, shader, drt.label()).unwrap();
@@ -290,6 +323,9 @@ fn drt_gpu_diagnostics() {
                 [f32::INFINITY, f32::NEG_INFINITY, 0.0],
             ] {
                 let mut parameters = Parameters::new(1, 1);
+                if drt == DrtKind::ReinhardAgx {
+                    parameters.set_reinhard_agx_for_headroom(ReinhardAgxParameters::default(), 1.0);
+                }
                 parameters.show_anomalies = show_anomalies;
                 pixels.extend(gpu.render(&pipeline, parameters, &[rgb[0], rgb[1], rgb[2], 1.0]));
             }
@@ -355,6 +391,44 @@ fn drt_gpu_hot_reload_recovers() {
         )
         .unwrap();
     }
+    // Other DRT controls must not overwrite the hybrid's curve or gamut/hue settings.
+    let hybrid = ReinhardAgxParameters {
+        base: ReinhardParameters {
+            compression_start: 0.3,
+            hue_retention: 0.2,
+            ..ReinhardParameters::default()
+        },
+        shoulder_power: 2.5,
+    };
+    drt.set_reinhard_agx_parameters(hybrid);
+    drt.set_drt(DrtKind::ReinhardAgx);
+    let hybrid_uniform = drt.parameters;
+    drt.set_agx_parameters(AgxParameters::hsv_default());
+    drt.set_reinhard_parameters(ReinhardParameters {
+        compression_start: 0.7,
+        ..ReinhardParameters::default()
+    });
+    drt.set_oklab_reinhard_parameters(ReinhardParameters::oklab_default());
+    assert_eq!(
+        bytemuck::bytes_of(&hybrid_uniform),
+        bytemuck::bytes_of(&drt.parameters)
+    );
+    drt.set_drt(DrtKind::AgxHsv);
+    drt.set_hdr_headroom(4.0);
+    drt.set_drt(DrtKind::ReinhardAgx);
+    let expected = hybrid.curve_for_headroom(4.0);
+    assert_eq!(drt.parameters.agx_shoulder_a, expected.shoulder_coefficient);
+    assert_eq!(drt.parameters.agx_shoulder_power, hybrid.shoulder_power);
+    assert_eq!(
+        drt.parameters.reinhard_compression_start,
+        hybrid.base.compression_start
+    );
+    assert_eq!(
+        drt.parameters.reinhard_hue_retention,
+        hybrid.base.hue_retention
+    );
+    drt.set_hdr_headroom(1.0);
+    drt.set_drt(DrtKind::ReinhardGamut);
     let input = [0.18, 0.18, 0.18, 1.0];
     let parameters = Parameters::new(1, 1);
     let original = gpu.render(&drt.pipelines.reinhard_gamut, parameters, &input);

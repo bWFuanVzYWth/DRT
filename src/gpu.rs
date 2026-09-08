@@ -15,6 +15,7 @@ const BUILT_OKLAB_SHADER: &str = include_str!("../shaders/oklab_drt.wgsl");
 const BUILT_AGX_S2O3_SHADER: &str = include_str!("../shaders/agx_s2o3.wgsl");
 const BUILT_AGX_HSV_SHADER: &str = include_str!("../shaders/agx_hsv.wgsl");
 const BUILT_REINHARD_GAMUT_SHADER: &str = include_str!("../shaders/reinhard_gamut.wgsl");
+const BUILT_REINHARD_AGX_SHADER: &str = include_str!("../shaders/reinhard_agx.wgsl");
 const BUILT_NONE_SHADER: &str = include_str!("../shaders/none_drt.wgsl");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,15 +25,17 @@ pub enum DrtKind {
     AgxS2O3,
     AgxHsv,
     ReinhardGamut,
+    ReinhardAgx,
 }
 
 impl DrtKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::None,
         Self::Oklab,
         Self::AgxS2O3,
         Self::AgxHsv,
         Self::ReinhardGamut,
+        Self::ReinhardAgx,
     ];
 
     pub fn label(self) -> &'static str {
@@ -42,6 +45,7 @@ impl DrtKind {
             Self::AgxS2O3 => "AgX-S2O3",
             Self::AgxHsv => "AgX-HSV",
             Self::ReinhardGamut => "Reinhard-Gamut",
+            Self::ReinhardAgx => "Reinhard AgX",
         }
     }
 
@@ -52,6 +56,7 @@ impl DrtKind {
             Self::AgxS2O3 => "agx_s2o3.wgsl",
             Self::AgxHsv => "agx_hsv.wgsl",
             Self::ReinhardGamut => "reinhard_gamut.wgsl",
+            Self::ReinhardAgx => "reinhard_agx.wgsl",
         }
     }
 
@@ -62,6 +67,7 @@ impl DrtKind {
             Self::AgxS2O3 => 2,
             Self::AgxHsv => 3,
             Self::ReinhardGamut => 4,
+            Self::ReinhardAgx => 5,
         }
     }
 
@@ -76,6 +82,7 @@ struct DrtPipelines {
     agx_s2o3: wgpu::ComputePipeline,
     agx_hsv: wgpu::ComputePipeline,
     reinhard_gamut: wgpu::ComputePipeline,
+    reinhard_agx: wgpu::ComputePipeline,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -180,6 +187,100 @@ impl ReinhardParameters {
             curve_peak,
             highlight_reach_ev: effective_reach,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReinhardAgxParameters {
+    pub base: ReinhardParameters,
+    pub shoulder_power: f32,
+}
+
+impl Default for ReinhardAgxParameters {
+    fn default() -> Self {
+        Self {
+            base: ReinhardParameters {
+                gamut_expansion: 0.04,
+                compression_start: 0.18,
+                highlight_reach_ev: 8.0,
+                hue_retention: 0.5,
+                ..ReinhardParameters::default()
+            },
+            shoulder_power: 3.0,
+        }
+    }
+}
+
+impl ReinhardAgxParameters {
+    pub fn minimum_highlight_reach_ev(self) -> f32 {
+        // ln(1 + distance) must exceed one at the requested peak, so the
+        // AgX coefficient stays positive even at a zero join and HDR headroom.
+        ((std::f32::consts::E - 1.0) / self.base.linear_middle_gray()).log2() + 0.1
+    }
+
+    pub fn constrain(&mut self) {
+        self.base.constrain();
+        self.base.highlight_reach_ev = self
+            .base
+            .highlight_reach_ev
+            .clamp(self.minimum_highlight_reach_ev(), 20.0);
+        self.shoulder_power = self.shoulder_power.clamp(1.0, 8.0);
+    }
+
+    pub fn curve_for_headroom(mut self, headroom: f32) -> ReinhardAgxCurveParameters {
+        self.constrain();
+        let output_peak = headroom.clamp(1.0, 64.0);
+        let highlight_reach_ev = self.base.highlight_reach_ev + output_peak.log2();
+        let linear_slope = self.base.linear_middle_gray() / 0.18;
+        let compression_start = self.base.compression_start;
+        let join = linear_slope * compression_start;
+        let extent = f64::from(output_peak - join);
+        let reach = 0.18_f64 * 2.0_f64.powf(f64::from(highlight_reach_ev));
+        let distance = f64::from(linear_slope) * (reach - f64::from(compression_start)) / extent;
+        // Normalized AgX shoulder: z / (1 + a*z^p)^(1/p).
+        // z = ln(1 + m*(x-P)/(H-mP)) gives a unit tangent at the join,
+        // supports P=0, and scales the log coordinate with HDR output room.
+        // Solve f(reach)=H analytically, preserving Reinhard's reach semantics.
+        let shoulder_coefficient =
+            (1.0 - distance.ln_1p().powf(-f64::from(self.shoulder_power))) as f32;
+        ReinhardAgxCurveParameters {
+            compression_start,
+            linear_slope,
+            output_peak,
+            shoulder_power: self.shoulder_power,
+            shoulder_coefficient,
+            curve_peak: join
+                + (extent
+                    * f64::from(shoulder_coefficient).powf(-1.0 / f64::from(self.shoulder_power)))
+                    as f32,
+            highlight_reach_ev,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ReinhardAgxCurveParameters {
+    pub compression_start: f32,
+    pub linear_slope: f32,
+    pub output_peak: f32,
+    pub shoulder_power: f32,
+    pub shoulder_coefficient: f32,
+    pub curve_peak: f32,
+    pub highlight_reach_ev: f32,
+}
+
+impl ReinhardAgxCurveParameters {
+    pub fn map_linear(self, value: f32) -> f32 {
+        if value <= self.compression_start {
+            return self.linear_slope * value;
+        }
+        let join = self.linear_slope * self.compression_start;
+        let extent = self.output_peak - join;
+        let distance = (self.linear_slope * (value - self.compression_start) / extent).ln_1p();
+        join + extent
+            * distance
+            * (1.0 + self.shoulder_coefficient * distance.powf(self.shoulder_power))
+                .powf(-1.0 / self.shoulder_power)
     }
 }
 
@@ -392,6 +493,19 @@ impl Parameters {
         };
         self.set_reinhard_for_headroom(source, direct_output_headroom(drt, headroom));
     }
+
+    fn set_reinhard_agx_for_headroom(&mut self, mut source: ReinhardAgxParameters, headroom: f32) {
+        source.constrain();
+        let curve = source.curve_for_headroom(headroom);
+        self.reinhard_gamut_expansion = source.base.gamut_expansion;
+        self.reinhard_compression_start = curve.compression_start;
+        self.reinhard_linear_slope = curve.linear_slope;
+        self.reinhard_output_peak = curve.output_peak;
+        self.reinhard_hue_retention = source.base.hue_retention;
+        self.reinhard_curve_peak = curve.curve_peak;
+        self.agx_shoulder_power = curve.shoulder_power;
+        self.agx_shoulder_a = curve.shoulder_coefficient;
+    }
 }
 
 fn extended_srgb_oetf(linear: f32) -> f32 {
@@ -406,7 +520,10 @@ fn extended_srgb_oetf(linear: f32) -> f32 {
 }
 
 fn direct_output_headroom(drt: DrtKind, headroom: f32) -> f32 {
-    if matches!(drt, DrtKind::None | DrtKind::ReinhardGamut) {
+    if matches!(
+        drt,
+        DrtKind::None | DrtKind::ReinhardGamut | DrtKind::ReinhardAgx
+    ) {
         headroom
     } else {
         1.0
@@ -453,6 +570,7 @@ pub struct DrtGpu {
     agx_parameters: AgxParameters,
     oklab_reinhard_parameters: ReinhardParameters,
     reinhard_parameters: ReinhardParameters,
+    reinhard_agx_parameters: ReinhardAgxParameters,
     hdr_headroom: f32,
     adapter_name: String,
     backend: wgpu::Backend,
@@ -489,6 +607,12 @@ impl DrtGpu {
                 &pipeline_layout,
                 BUILT_REINHARD_GAMUT_SHADER,
                 "Reinhard-Gamut DRT",
+            )?,
+            reinhard_agx: create_pipeline(
+                device,
+                &pipeline_layout,
+                BUILT_REINHARD_AGX_SHADER,
+                "Reinhard AgX DRT",
             )?,
         };
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -545,6 +669,7 @@ impl DrtGpu {
             agx_parameters: AgxParameters::default(),
             oklab_reinhard_parameters: ReinhardParameters::oklab_default(),
             reinhard_parameters: ReinhardParameters::default(),
+            reinhard_agx_parameters: ReinhardAgxParameters::default(),
             hdr_headroom: 1.0,
             adapter_name: info.name,
             backend: info.backend,
@@ -652,6 +777,18 @@ impl DrtGpu {
         self.dispatch();
     }
 
+    pub fn set_reinhard_agx_parameters(&mut self, mut source: ReinhardAgxParameters) {
+        source.constrain();
+        self.reinhard_agx_parameters = source;
+        self.apply_reinhard_parameters();
+        self.render_state.queue.write_buffer(
+            &self.uniform,
+            0,
+            bytemuck::bytes_of(&self.parameters),
+        );
+        self.dispatch();
+    }
+
     pub fn set_show_anomalies(&mut self, show: bool) {
         self.parameters.show_anomalies = u32::from(show);
         self.render_state.queue.write_buffer(
@@ -697,6 +834,7 @@ impl DrtGpu {
             DrtKind::AgxS2O3 => self.pipelines.agx_s2o3 = next,
             DrtKind::AgxHsv => self.pipelines.agx_hsv = next,
             DrtKind::ReinhardGamut => self.pipelines.reinhard_gamut = next,
+            DrtKind::ReinhardAgx => self.pipelines.reinhard_agx = next,
         }
         if self.active_drt == drt {
             self.dispatch();
@@ -729,6 +867,11 @@ impl DrtGpu {
     }
 
     fn apply_agx_parameters(&mut self) {
+        if self.active_drt == DrtKind::ReinhardAgx {
+            self.parameters
+                .set_reinhard_agx_for_headroom(self.reinhard_agx_parameters, self.hdr_headroom);
+            return;
+        }
         let headroom = if self.active_drt == DrtKind::AgxHsv {
             self.hdr_headroom
         } else {
@@ -739,6 +882,11 @@ impl DrtGpu {
     }
 
     fn apply_reinhard_parameters(&mut self) {
+        if self.active_drt == DrtKind::ReinhardAgx {
+            self.parameters
+                .set_reinhard_agx_for_headroom(self.reinhard_agx_parameters, self.hdr_headroom);
+            return;
+        }
         self.parameters.set_reinhard_for_drt(
             self.active_drt,
             self.oklab_reinhard_parameters,
@@ -771,6 +919,7 @@ impl DrtGpu {
                 DrtKind::AgxS2O3 => &self.pipelines.agx_s2o3,
                 DrtKind::AgxHsv => &self.pipelines.agx_hsv,
                 DrtKind::ReinhardGamut => &self.pipelines.reinhard_gamut,
+                DrtKind::ReinhardAgx => &self.pipelines.reinhard_agx,
             };
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &self.image.bind_group, &[]);
@@ -1074,8 +1223,8 @@ mod validation;
 #[cfg(test)]
 mod tests {
     use super::{
-        AgxParameters, DrtKind, Parameters, ReinhardParameters, curve_coefficient,
-        curve_parameters, direct_output_headroom, extended_srgb_oetf,
+        AgxParameters, DrtKind, Parameters, ReinhardAgxParameters, ReinhardParameters,
+        curve_coefficient, curve_parameters, direct_output_headroom, extended_srgb_oetf,
     };
     use crate::tone_curve::SAMPLE_COUNT;
 
@@ -1356,6 +1505,81 @@ mod tests {
                 assert_eq!(parameters.reinhard_curve_peak, curve.curve_peak);
             }
         }
+    }
+
+    #[test]
+    fn reinhard_agx_log_shoulder_preserves_the_line_tangent_and_reach() {
+        for input_scale in [0.1, ReinhardParameters::default().input_scale, 8.0] {
+            for compression_start in [0.0, 0.01, 0.18, 0.5, 100.0] {
+                for highlight_reach_ev in [0.0, 10.0, 20.0] {
+                    for shoulder_power in [1.0, 5.2, 8.0] {
+                        let mut source = ReinhardAgxParameters {
+                            base: ReinhardParameters {
+                                input_scale,
+                                compression_start,
+                                highlight_reach_ev,
+                                ..ReinhardParameters::default()
+                            },
+                            shoulder_power,
+                        };
+                        source.constrain();
+                        for headroom in [1.0, 4.0, 64.0] {
+                            let curve = source.curve_for_headroom(headroom);
+                            let start = curve.compression_start;
+                            let join = curve.linear_slope * start;
+                            assert_eq!(curve.map_linear(0.0), 0.0);
+                            assert_eq!(curve.map_linear(start * 0.5), join * 0.5);
+                            assert_eq!(curve.map_linear(start), join);
+                            assert!(curve.shoulder_coefficient > 0.0);
+                            assert!(curve.curve_peak.is_finite() && curve.curve_peak >= headroom);
+                            let step = 1.0e-5 / curve.linear_slope;
+                            let right_slope = (curve.map_linear(start + step) - join) / step;
+                            assert!((right_slope / curve.linear_slope - 1.0).abs() < 0.02);
+                            let reach = 0.18 * 2.0_f32.powf(curve.highlight_reach_ev);
+                            assert!((curve.map_linear(reach) / headroom - 1.0).abs() < 2.0e-5);
+                            let mut previous = join;
+                            for index in 1..=64 {
+                                let mapped =
+                                    curve.map_linear(start + (reach - start) * index as f32 / 32.0);
+                                assert!(
+                                    mapped.is_finite() && mapped + 1.0e-5 * headroom >= previous
+                                );
+                                assert!(mapped <= curve.curve_peak + 1.0e-5 * headroom);
+                                previous = mapped;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reinhard_agx_shoulder_power_changes_highlights_without_changing_shadows() {
+        let source = ReinhardAgxParameters::default();
+        assert_eq!(source.base.gamut_expansion, 0.04);
+        assert_eq!(source.base.compression_start, 0.18);
+        assert_eq!(source.base.highlight_reach_ev, 8.0);
+        assert_eq!(source.base.hue_retention, 0.5);
+        assert_eq!(source.shoulder_power, 3.0);
+        let soft = ReinhardAgxParameters {
+            shoulder_power: 1.0,
+            ..source
+        }
+        .curve_for_headroom(1.0);
+        let hard = ReinhardAgxParameters {
+            shoulder_power: 8.0,
+            ..source
+        }
+        .curve_for_headroom(1.0);
+        for input in [0.0, 0.045, 0.09, 0.18] {
+            assert_eq!(soft.map_linear(input), hard.map_linear(input));
+            assert!((soft.map_linear(input) - input).abs() < 1.0e-6);
+        }
+        assert!(hard.map_linear(1.0) > soft.map_linear(1.0) + 0.05);
+        let hdr = source.curve_for_headroom(4.0);
+        assert_eq!(hdr.highlight_reach_ev, source.base.highlight_reach_ev + 2.0);
+        assert!((hdr.map_linear(0.18) - source.base.linear_middle_gray()).abs() < 1.0e-6);
     }
 
     #[test]

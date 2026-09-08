@@ -14,7 +14,7 @@ use eframe::egui::{self, Color32, RichText, Vec2};
 
 use crate::distribution::{ColorSpace, DEFAULT_PITCH, DEFAULT_YAW, DistributionRenderer};
 use crate::file_browser::{FolderBrowser, Thumbnail, ThumbnailLoader};
-use crate::gpu::{AgxParameters, DrtGpu, DrtKind, ReinhardParameters};
+use crate::gpu::{AgxParameters, DrtGpu, DrtKind, ReinhardAgxParameters, ReinhardParameters};
 use crate::presenter::{DisplayOutput, StartupOptions};
 use crate::tone_curve::ToneCurveRenderer;
 
@@ -58,12 +58,13 @@ struct DrtApp {
     agx_white_hue_retention: f32,
     oklab_reinhard_parameters: ReinhardParameters,
     reinhard_parameters: ReinhardParameters,
+    reinhard_agx_parameters: ReinhardAgxParameters,
     show_anomalies: bool,
     image_name: String,
     status: String,
     status_error: bool,
-    shader_paths: [PathBuf; 5],
-    shader_modified: [Option<std::time::SystemTime>; 5],
+    shader_paths: [PathBuf; DrtKind::ALL.len()],
+    shader_modified: [Option<std::time::SystemTime>; DrtKind::ALL.len()],
     last_shader_check: std::time::Instant,
     workspace_view: WorkspaceView,
     color_space: ColorSpace,
@@ -94,13 +95,7 @@ impl DrtApp {
         display_output: DisplayOutput,
     ) -> anyhow::Result<Self> {
         let shader_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders");
-        let shader_paths = [
-            shader_directory.join(DrtKind::None.shader_file()),
-            shader_directory.join(DrtKind::Oklab.shader_file()),
-            shader_directory.join(DrtKind::AgxS2O3.shader_file()),
-            shader_directory.join(DrtKind::AgxHsv.shader_file()),
-            shader_directory.join(DrtKind::ReinhardGamut.shader_file()),
-        ];
+        let shader_paths = DrtKind::ALL.map(|drt| shader_directory.join(drt.shader_file()));
         let shader_modified = shader_paths.each_ref().map(|path| modified_time(path));
         let image = match initial_image {
             Some(path) => image_io::load(path)?,
@@ -136,6 +131,7 @@ impl DrtApp {
             agx_white_hue_retention: 0.5,
             oklab_reinhard_parameters: ReinhardParameters::oklab_default(),
             reinhard_parameters: ReinhardParameters::default(),
+            reinhard_agx_parameters: ReinhardAgxParameters::default(),
             show_anomalies: initial_show_anomalies,
             image_name,
             status: folder_browser.as_ref().map_or_else(
@@ -395,6 +391,9 @@ impl DrtApp {
                         DrtKind::ReinhardGamut => self
                             .gpu
                             .set_reinhard_parameters(self.reinhard_parameters),
+                        DrtKind::ReinhardAgx => self
+                            .gpu
+                            .set_reinhard_agx_parameters(self.reinhard_agx_parameters),
                         DrtKind::None | DrtKind::Oklab => {}
                     }
                     self.gpu.set_drt(selected_drt);
@@ -416,7 +415,7 @@ impl DrtApp {
                                 .text("HDR headroom"),
                         )
                         .on_hover_text(
-                            "Controls the None clamp and the AgX-HSV/Reinhard-Gamut HDR range; 1.0× exactly reproduces SDR output",
+                            "Controls the output range of HDR-capable DRTs; 1.0× exactly reproduces SDR output",
                         )
                         .changed();
                     if changed {
@@ -452,6 +451,7 @@ impl DrtApp {
                         DrtKind::None => "None",
                         DrtKind::AgxHsv => "AgX-HSV",
                         DrtKind::ReinhardGamut => "Reinhard-Gamut",
+                        DrtKind::ReinhardAgx => "Reinhard AgX",
                         DrtKind::Oklab | DrtKind::AgxS2O3 => "HDR target",
                     };
                     ui.label(
@@ -465,7 +465,7 @@ impl DrtApp {
                 } else {
                     ui.label(
                         RichText::new(
-                            "OS/display exposes no HDR scRGB surface; None, AgX-HSV, and Reinhard-Gamut are forced to their SDR ranges",
+                            "OS/display exposes no HDR scRGB surface; all DRTs use their SDR ranges",
                         )
                         .small()
                         .weak(),
@@ -497,16 +497,23 @@ impl DrtApp {
                 if exposure_changed {
                     self.gpu.set_exposure(self.exposure_ev);
                 }
-                if matches!(active_drt, DrtKind::ReinhardGamut | DrtKind::Oklab) {
+                if matches!(active_drt, DrtKind::ReinhardGamut | DrtKind::ReinhardAgx | DrtKind::Oklab) {
+                    let using_agx = active_drt == DrtKind::ReinhardAgx;
+                    let mut reinhard_agx = self.reinhard_agx_parameters;
                     let mut reinhard_parameters = if active_drt == DrtKind::Oklab {
                         self.oklab_reinhard_parameters
+                    } else if using_agx {
+                        reinhard_agx.base
                     } else {
                         self.reinhard_parameters
                     };
                     ui.separator();
                     let mut reinhard_changed = false;
-                    if active_drt == DrtKind::ReinhardGamut {
-                        ui.label(RichText::new("Reinhard gamut experiment").strong());
+                    if active_drt != DrtKind::Oklab {
+                        ui.label(RichText::new(active_drt.label()).strong());
+                        if using_agx {
+                            ui.label(RichText::new("Linear shadows · AgX log shoulder · independent settings").small().weak());
+                        }
                         reinhard_changed |= ui
                             .add(
                                 egui::Slider::new(
@@ -518,7 +525,7 @@ impl DrtApp {
                                 .text("Virtual gamut expansion"),
                             )
                             .on_hover_text(
-                                "Moves the virtual primaries outward, so Rec.709 coordinates contract toward the neutral axis before Reinhard",
+                                "Moves the virtual primaries outward, so Rec.709 coordinates contract toward the neutral axis before the tone curve",
                             )
                             .changed();
                     } else {
@@ -536,7 +543,7 @@ impl DrtApp {
                                 0.1..=8.0,
                             )
                             .step_by(0.01)
-                            .text("Reinhard input scale"),
+                            .text("Input scale"),
                         )
                         .on_hover_text(
                             "Defines the linear segment's slope using 18% gray; gray is compressed when Compression start is below 0.18",
@@ -555,10 +562,15 @@ impl DrtApp {
                             .text("Compression start"),
                         )
                         .on_hover_text(
-                            "Scene-linear input where the straight segment joins the Reinhard shoulder; default 0.18 for Oklab and 0.5 for Reinhard-Gamut. The maximum keeps the join below SDR white",
+                            "Scene-linear input where the straight segment joins the shoulder. The maximum keeps the join below SDR white",
                         )
                         .changed();
-                    let minimum_reach = reinhard_parameters.minimum_highlight_reach_ev();
+                    let minimum_reach = if using_agx {
+                        reinhard_agx.base = reinhard_parameters;
+                        reinhard_agx.minimum_highlight_reach_ev()
+                    } else {
+                        reinhard_parameters.minimum_highlight_reach_ev()
+                    };
                     reinhard_changed |= ui
                         .add(
                             egui::Slider::new(
@@ -573,7 +585,15 @@ impl DrtApp {
                             "Scene stops above 18% gray that first reach the display peak; shorter reach permits more curve overexposure and preserves stronger mid-highlight color",
                         )
                         .changed();
-                    if active_drt == DrtKind::ReinhardGamut {
+                    if using_agx {
+                        reinhard_changed |= ui
+                            .add(egui::Slider::new(&mut reinhard_agx.shoulder_power, 1.0..=8.0)
+                                .step_by(0.05)
+                                .text("Shoulder power"))
+                            .on_hover_text("AgX shoulder shape: higher values delay compression and approach white more sharply; the linear segment and its join stay fixed")
+                            .changed();
+                    }
+                    if active_drt != DrtKind::Oklab {
                         reinhard_changed |= ui
                             .add(
                                 egui::Slider::new(
@@ -590,37 +610,47 @@ impl DrtApp {
                             .changed();
                     }
                     reinhard_parameters.constrain();
-                    let curve_headroom = if active_drt == DrtKind::ReinhardGamut {
+                    if using_agx {
+                        reinhard_agx.base = reinhard_parameters;
+                        reinhard_agx.constrain();
+                        reinhard_parameters = reinhard_agx.base;
+                    }
+                    let curve_headroom = if active_drt != DrtKind::Oklab {
                         self.gpu.output_headroom()
                     } else {
                         1.0
                     };
-                    let curve = reinhard_parameters.curve_for_headroom(curve_headroom);
+                    let (mapped_gray, effective_reach, curve_details) = if using_agx {
+                        let curve = reinhard_agx.curve_for_headroom(curve_headroom);
+                        (curve.map_linear(0.18), curve.highlight_reach_ev, format!(
+                            "Curve asymptote {:.3}× · display clamp {:.3}× · linear slope {:.3}",
+                            curve.curve_peak, curve_headroom, curve.linear_slope,
+                        ))
+                    } else {
+                        let curve = reinhard_parameters.curve_for_headroom(curve_headroom);
+                        (curve.map_linear(0.18), curve.highlight_reach_ev, format!(
+                            "Curve asymptote {:.3}× · display clamp {:.3}× · linear slope {:.3} · shoulder rate {:.3}",
+                            curve.curve_peak, curve_headroom, curve.linear_slope, curve.shoulder_scale,
+                        ))
+                    };
                     ui.label(
                         RichText::new(format!(
                             "18% gray → {:.3} · SDR reach {:+.2} EV · effective reach {:+.2} EV",
-                            curve.map_linear(0.18),
+                            mapped_gray,
                             reinhard_parameters.highlight_reach_ev,
-                            curve.highlight_reach_ev,
+                            effective_reach,
                         ))
                         .small()
                         .weak(),
                     );
-                    ui.label(
-                        RichText::new(format!(
-                            "Curve asymptote {:.3}× · display clamp {:.3}× · linear slope {:.3} · shoulder rate {:.3}",
-                            curve.curve_peak,
-                            curve_headroom,
-                            curve.linear_slope,
-                            curve.shoulder_scale,
-                        ))
-                        .small()
-                        .weak(),
-                    );
+                    ui.label(RichText::new(curve_details).small().weak());
                     if reinhard_changed {
                         if active_drt == DrtKind::Oklab {
                             self.oklab_reinhard_parameters = reinhard_parameters;
                             self.gpu.set_oklab_reinhard_parameters(reinhard_parameters);
+                        } else if using_agx {
+                            self.reinhard_agx_parameters = reinhard_agx;
+                            self.gpu.set_reinhard_agx_parameters(reinhard_agx);
                         } else {
                             self.reinhard_parameters = reinhard_parameters;
                             self.gpu.set_reinhard_parameters(reinhard_parameters);
@@ -631,13 +661,13 @@ impl DrtApp {
                     let mut agx_parameters = match active_drt {
                         DrtKind::AgxS2O3 => self.agx_s2o3_parameters,
                         DrtKind::AgxHsv => self.agx_hsv_parameters,
-                        DrtKind::None | DrtKind::Oklab | DrtKind::ReinhardGamut => unreachable!(),
+                        DrtKind::None | DrtKind::Oklab | DrtKind::ReinhardGamut | DrtKind::ReinhardAgx => unreachable!(),
                     };
                     ui.separator();
                     let heading = match active_drt {
                         DrtKind::AgxS2O3 => "AgX-S2O3 reference scale",
                         DrtKind::AgxHsv => "AgX-HSV tone scale",
-                        DrtKind::None | DrtKind::Oklab | DrtKind::ReinhardGamut => unreachable!(),
+                        DrtKind::None | DrtKind::Oklab | DrtKind::ReinhardGamut | DrtKind::ReinhardAgx => unreachable!(),
                     };
                     ui.label(RichText::new(heading).strong());
 
@@ -746,7 +776,7 @@ impl DrtApp {
                     match active_drt {
                         DrtKind::AgxS2O3 => self.agx_s2o3_parameters = agx_parameters,
                         DrtKind::AgxHsv => self.agx_hsv_parameters = agx_parameters,
-                        DrtKind::None | DrtKind::Oklab | DrtKind::ReinhardGamut => unreachable!(),
+                        DrtKind::None | DrtKind::Oklab | DrtKind::ReinhardGamut | DrtKind::ReinhardAgx => unreachable!(),
                     }
                     if agx_changed {
                         self.gpu.set_agx_parameters(agx_parameters);
@@ -830,12 +860,13 @@ impl DrtApp {
                     self.agx_white_hue_retention = 0.5;
                     self.oklab_reinhard_parameters = ReinhardParameters::oklab_default();
                     self.reinhard_parameters = ReinhardParameters::default();
+                    self.reinhard_agx_parameters = ReinhardAgxParameters::default();
                     self.show_anomalies = false;
                     self.gpu.set_exposure(self.exposure_ev);
                     let active_agx_parameters = match self.gpu.active_drt() {
                         DrtKind::AgxS2O3 => Some(self.agx_s2o3_parameters),
                         DrtKind::AgxHsv => Some(self.agx_hsv_parameters),
-                        DrtKind::None | DrtKind::Oklab | DrtKind::ReinhardGamut => None,
+                        DrtKind::None | DrtKind::Oklab | DrtKind::ReinhardGamut | DrtKind::ReinhardAgx => None,
                     };
                     if let Some(parameters) = active_agx_parameters {
                         self.gpu.set_agx_parameters(parameters);
@@ -848,6 +879,8 @@ impl DrtApp {
                         .set_oklab_reinhard_parameters(self.oklab_reinhard_parameters);
                     self.gpu
                         .set_reinhard_parameters(self.reinhard_parameters);
+                    self.gpu
+                        .set_reinhard_agx_parameters(self.reinhard_agx_parameters);
                     self.gpu.set_show_anomalies(false);
                 }
                 ui.separator();
