@@ -206,7 +206,7 @@ impl Default for ReinhardAgxParameters {
                 hue_retention: 0.5,
                 ..ReinhardParameters::default()
             },
-            shoulder_power: 3.0,
+            shoulder_power: 5.0,
         }
     }
 }
@@ -1561,7 +1561,7 @@ mod tests {
         assert_eq!(source.base.compression_start, 0.18);
         assert_eq!(source.base.highlight_reach_ev, 8.0);
         assert_eq!(source.base.hue_retention, 0.5);
-        assert_eq!(source.shoulder_power, 3.0);
+        assert_eq!(source.shoulder_power, 5.0);
         let soft = ReinhardAgxParameters {
             shoulder_power: 1.0,
             ..source
