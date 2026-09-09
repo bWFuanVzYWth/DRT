@@ -45,4 +45,4 @@ cargo clippy --all-targets -- -D warnings
 
 ## 许可
 
-项目尚未选择整体开源许可证。第三方实现的许可证单独保留在 [THIRD_PARTY_LICENSES/](THIRD_PARTY_LICENSES/)。
+本项目采用 [GNU General Public License v3.0](LICENSE)（`GPL-3.0-only`）。

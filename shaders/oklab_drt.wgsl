@@ -1,4 +1,5 @@
-// Oklab DRT developed by this project's authors. Project license is not selected yet.
+// SPDX-License-Identifier: GPL-3.0-only
+// Oklab DRT developed by this project's authors.
 // Input: scene-linear ACES2065-1 (AP0). Output: display-encoded sRGB.
 
 // Keep field order in sync with Parameters in src/gpu.rs.

@@ -1,6 +1,7 @@
-// AgX-S2O3 analytical display transform, ported from:
+// SPDX-License-Identifier: GPL-3.0-only
+// AgX-S2O3 analytical display transform by linlin, ported from the author's implementation:
 // C:/WorkSpace/AgX/agx.glsl at commit 0796e1b4aa9df94152eff353bae131eae1a4c087.
-// Copyright (c) 2024 linlin. MIT licensed; see THIRD_PARTY_LICENSES/AgX-S2O3.txt.
+// Copyright (c) 2024 linlin.
 // Input: scene-linear ACES2065-1 (AP0). Output: display-encoded BT.709/sRGB.
 
 // Keep field order in sync with Parameters in src/gpu.rs.
