@@ -162,11 +162,11 @@ fn drt_gpu_outputs() {
     let image = crate::image_io::test_pattern(63, 9);
     let shaders: [&str; DrtKind::ALL.len()] = [
         BUILT_NONE_SHADER,
-        BUILT_OKLAB_SHADER,
+        BUILT_OKLAB_REINHARD_SHADER,
         BUILT_AGX_S2O3_SHADER,
-        BUILT_AGX_HSV_SHADER,
-        BUILT_REINHARD_GAMUT_SHADER,
-        BUILT_REINHARD_AGX_SHADER,
+        BUILT_RGB_LOG_SIGMOID_SHADER,
+        BUILT_RGB_REINHARD_SHADER,
+        BUILT_RGB_LOG_SHOULDER_SHADER,
     ];
     for (drt, shader) in DrtKind::ALL.into_iter().zip(shaders) {
         let pipeline = create_pipeline(&gpu.device, &gpu.layout, shader, drt.label()).unwrap();
@@ -187,37 +187,37 @@ fn drt_gpu_outputs() {
                 parameters.exposure_multiplier = 4.0;
             }
             parameters.set_reinhard_for_drt(drt, oklab, reinhard, headroom);
-            parameters.set_agx_for_headroom(
-                if drt == DrtKind::AgxHsv {
-                    AgxParameters::hsv_default()
+            parameters.set_log_sigmoid_for_headroom(
+                if drt == DrtKind::RgbLogSigmoid {
+                    LogSigmoidParameters::rgb_default()
                 } else {
-                    AgxParameters::default()
+                    LogSigmoidParameters::default()
                 },
-                if drt == DrtKind::AgxHsv {
+                if drt == DrtKind::RgbLogSigmoid {
                     headroom
                 } else {
                     1.0
                 },
             );
-            let hybrid = if variant >= 3 {
-                ReinhardAgxParameters {
+            let log_shoulder = if variant >= 3 {
+                RgbLogShoulderParameters {
                     base: reinhard,
                     shoulder_power: 1.5,
                 }
             } else {
-                ReinhardAgxParameters::default()
+                RgbLogShoulderParameters::default()
             };
-            if drt == DrtKind::ReinhardAgx {
-                parameters.set_reinhard_agx_for_headroom(hybrid, headroom);
+            if drt == DrtKind::RgbLogShoulder {
+                parameters.set_rgb_log_shoulder_for_headroom(log_shoulder, headroom);
             }
             let pixels = gpu.render(&pipeline, parameters, &image.rgba);
             assert!(pixels.iter().all(|v| v.is_finite() && *v >= 0.0));
             assert!(pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 1.0));
             let peak = match drt {
-                DrtKind::None | DrtKind::ReinhardGamut | DrtKind::ReinhardAgx => {
+                DrtKind::None | DrtKind::RgbReinhard | DrtKind::RgbLogShoulder => {
                     extended_srgb_oetf(headroom)
                 }
-                DrtKind::AgxHsv => parameters.agx_output_peak,
+                DrtKind::RgbLogSigmoid => parameters.log_sigmoid_output_peak,
                 _ => 1.0,
             };
             assert!(
@@ -233,7 +233,7 @@ fn drt_gpu_outputs() {
                 assert!((pixel[0] - pixel[1]).abs() < 0.003 * peak);
                 assert!((pixel[1] - pixel[2]).abs() < 0.003 * peak);
             }
-            if drt == DrtKind::Oklab {
+            if drt == DrtKind::OklabReinhard {
                 // Oklab always applies the independent piecewise curve in L^3.
                 // Allow fp16 storage and the AP0/Rec.709 neutral-axis rounding.
                 let curve = oklab.curve_for_headroom(1.0);
@@ -249,13 +249,13 @@ fn drt_gpu_outputs() {
                         extended_srgb_oetf((curve.map_linear(value) * 0.99999).clamp(0.0, 1.0));
                     assert!(
                         (pixel[0] - expected).abs() < 0.003,
-                        "Oklab curve: expected {expected}, got {}",
+                        "Oklab Reinhard curve: expected {expected}, got {}",
                         pixel[0]
                     );
                 }
             }
-            if drt == DrtKind::ReinhardAgx {
-                let curve = hybrid.curve_for_headroom(headroom);
+            if drt == DrtKind::RgbLogShoulder {
+                let curve = log_shoulder.curve_for_headroom(headroom);
                 for (pixel, input) in ramp
                     .as_chunks::<4>()
                     .0
@@ -267,7 +267,7 @@ fn drt_gpu_outputs() {
                     let expected = extended_srgb_oetf(curve.map_linear(value).clamp(0.0, headroom));
                     assert!(
                         (pixel[0] - expected).abs() < 0.003 * peak,
-                        "Reinhard AgX: expected {expected}, got {}",
+                        "RGB Log Shoulder: expected {expected}, got {}",
                         pixel[0]
                     );
                 }
@@ -284,7 +284,10 @@ fn drt_gpu_outputs() {
             if headroom > 1.0
                 && matches!(
                     drt,
-                    DrtKind::None | DrtKind::AgxHsv | DrtKind::ReinhardGamut | DrtKind::ReinhardAgx
+                    DrtKind::None
+                        | DrtKind::RgbLogSigmoid
+                        | DrtKind::RgbReinhard
+                        | DrtKind::RgbLogShoulder
                 )
             {
                 assert!(
@@ -303,11 +306,11 @@ fn drt_gpu_diagnostics() {
     let gpu = TestGpu::new();
     let shaders: [&str; DrtKind::ALL.len()] = [
         BUILT_NONE_SHADER,
-        BUILT_OKLAB_SHADER,
+        BUILT_OKLAB_REINHARD_SHADER,
         BUILT_AGX_S2O3_SHADER,
-        BUILT_AGX_HSV_SHADER,
-        BUILT_REINHARD_GAMUT_SHADER,
-        BUILT_REINHARD_AGX_SHADER,
+        BUILT_RGB_LOG_SIGMOID_SHADER,
+        BUILT_RGB_REINHARD_SHADER,
+        BUILT_RGB_LOG_SHOULDER_SHADER,
     ];
     for (drt, shader) in DrtKind::ALL.into_iter().zip(shaders) {
         let pipeline = create_pipeline(&gpu.device, &gpu.layout, shader, drt.label()).unwrap();
@@ -323,8 +326,11 @@ fn drt_gpu_diagnostics() {
                 [f32::INFINITY, f32::NEG_INFINITY, 0.0],
             ] {
                 let mut parameters = Parameters::new(1, 1);
-                if drt == DrtKind::ReinhardAgx {
-                    parameters.set_reinhard_agx_for_headroom(ReinhardAgxParameters::default(), 1.0);
+                if drt == DrtKind::RgbLogShoulder {
+                    parameters.set_rgb_log_shoulder_for_headroom(
+                        RgbLogShoulderParameters::default(),
+                        1.0,
+                    );
                 }
                 parameters.show_anomalies = show_anomalies;
                 pixels.extend(gpu.render(&pipeline, parameters, &[rgb[0], rgb[1], rgb[2], 1.0]));
@@ -391,8 +397,8 @@ fn drt_gpu_hot_reload_recovers() {
         )
         .unwrap();
     }
-    // Other DRT controls must not overwrite the hybrid's curve or gamut/hue settings.
-    let hybrid = ReinhardAgxParameters {
+    // Other DRT controls must not overwrite the log_shoulder's curve or gamut/hue settings.
+    let log_shoulder = RgbLogShoulderParameters {
         base: ReinhardParameters {
             compression_start: 0.3,
             hue_retention: 0.2,
@@ -400,47 +406,51 @@ fn drt_gpu_hot_reload_recovers() {
         },
         shoulder_power: 2.5,
     };
-    drt.set_reinhard_agx_parameters(hybrid);
-    drt.set_drt(DrtKind::ReinhardAgx);
-    let hybrid_uniform = drt.parameters;
-    drt.set_agx_parameters(AgxParameters::hsv_default());
-    drt.set_reinhard_parameters(ReinhardParameters {
+    drt.set_rgb_log_shoulder_parameters(log_shoulder);
+    drt.set_drt(DrtKind::RgbLogShoulder);
+    let log_shoulder_uniform = drt.parameters;
+    drt.set_log_sigmoid_parameters(LogSigmoidParameters::rgb_default());
+    drt.set_rgb_reinhard_parameters(ReinhardParameters {
         compression_start: 0.7,
         ..ReinhardParameters::default()
     });
     drt.set_oklab_reinhard_parameters(ReinhardParameters::oklab_default());
     assert_eq!(
-        bytemuck::bytes_of(&hybrid_uniform),
+        bytemuck::bytes_of(&log_shoulder_uniform),
         bytemuck::bytes_of(&drt.parameters)
     );
-    drt.set_drt(DrtKind::AgxHsv);
+    drt.set_drt(DrtKind::RgbLogSigmoid);
     drt.set_hdr_headroom(4.0);
-    drt.set_drt(DrtKind::ReinhardAgx);
-    let expected = hybrid.curve_for_headroom(4.0);
-    assert_eq!(drt.parameters.agx_shoulder_a, expected.shoulder_coefficient);
-    assert_eq!(drt.parameters.agx_shoulder_power, hybrid.shoulder_power);
+    drt.set_drt(DrtKind::RgbLogShoulder);
+    let expected = log_shoulder.curve_for_headroom(4.0);
     assert_eq!(
-        drt.parameters.reinhard_compression_start,
-        hybrid.base.compression_start
+        drt.parameters.sigmoid_shoulder_coefficient,
+        expected.shoulder_coefficient
     );
     assert_eq!(
-        drt.parameters.reinhard_hue_retention,
-        hybrid.base.hue_retention
+        drt.parameters.sigmoid_shoulder_power,
+        log_shoulder.shoulder_power
+    );
+    assert_eq!(
+        drt.parameters.linear_compression_start,
+        log_shoulder.base.compression_start
+    );
+    assert_eq!(
+        drt.parameters.rgb_hue_retention,
+        log_shoulder.base.hue_retention
     );
     drt.set_hdr_headroom(1.0);
-    drt.set_drt(DrtKind::ReinhardGamut);
+    drt.set_drt(DrtKind::RgbReinhard);
     let input = [0.18, 0.18, 0.18, 1.0];
     let parameters = Parameters::new(1, 1);
-    let original = gpu.render(&drt.pipelines.reinhard_gamut, parameters, &input);
+    let original = gpu.render(&drt.pipelines.rgb_reinhard, parameters, &input);
     let file = std::env::temp_dir().join(format!("drt-reload-test-{}.wgsl", std::process::id()));
     std::fs::write(&file, "invalid WGSL").unwrap();
-    let error = drt
-        .reload_shader(DrtKind::ReinhardGamut, &file)
-        .unwrap_err();
+    let error = drt.reload_shader(DrtKind::RgbReinhard, &file).unwrap_err();
     assert!(format!("{error:#}").contains("parsing error"));
     assert_eq!(
         original,
-        gpu.render(&drt.pipelines.reinhard_gamut, parameters, &input)
+        gpu.render(&drt.pipelines.rgb_reinhard, parameters, &input)
     );
     // A valid edit must actually replace the pipeline after a failed edit.
     std::fs::write(
@@ -456,13 +466,13 @@ fn drt_gpu_hot_reload_recovers() {
     "#,
     )
     .unwrap();
-    drt.reload_shader(DrtKind::ReinhardGamut, &file).unwrap();
+    drt.reload_shader(DrtKind::RgbReinhard, &file).unwrap();
     assert_color(
-        &gpu.render(&drt.pipelines.reinhard_gamut, parameters, &input),
+        &gpu.render(&drt.pipelines.rgb_reinhard, parameters, &input),
         [0.25, 0.5, 0.75],
     );
     std::fs::remove_file(&file).unwrap();
-    assert!(drt.reload_shader(DrtKind::ReinhardGamut, &file).is_err());
+    assert!(drt.reload_shader(DrtKind::RgbReinhard, &file).is_err());
     gpu.device
         .poll(wgpu::PollType::wait_indefinitely())
         .unwrap();

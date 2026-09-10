@@ -1,4 +1,6 @@
-// Unified SDR/HDR AgX followed by an optional HSV hue repair.
+// RGB Log Sigmoid: virtual RGB coordinates, a per-channel log2 sigmoid with
+// separate toe and shoulder, and optional HSV hue repair in the display signal.
+// Derived from the AgX tone-scale structure, with custom defaults and HDR support.
 // Input: scene-linear ACES2065-1 (AP0).
 // Output: display-encoded extended sRGB (1.0 is SDR reference white).
 
@@ -8,26 +10,26 @@ struct DrtParameters {
     width: u32,
     height: u32,
     showAnomalies: u32,
-    agxMinimumLog2: f32,
-    agxInverseDynamicRange: f32,
-    agxInputPivot: f32,
-    agxOutputPivot: f32,
-    agxPivotSlope: f32,
-    agxToePower: f32,
-    agxShoulderPower: f32,
-    agxGamutCompression: f32,
-    agxToeA: f32,
-    agxShoulderA: f32,
-    agxBlackHueRetention: f32,
-    agxWhiteHueRetention: f32,
-    reinhardCompressionStart: f32,
-    agxMaximumLogCoordinate: f32,
-    agxOutputPeak: f32,
-    reinhardGamutExpansion: f32,
-    reinhardLinearSlope: f32,
-    reinhardOutputPeak: f32,
-    reinhardHueRetention: f32,
-    reinhardCurvePeak: f32,
+    logSigmoidMinimumLog2: f32,
+    logSigmoidInverseDynamicRange: f32,
+    logSigmoidInputPivot: f32,
+    logSigmoidOutputPivot: f32,
+    logSigmoidPivotSlope: f32,
+    logSigmoidToePower: f32,
+    sigmoidShoulderPower: f32,
+    logSigmoidGamutCompression: f32,
+    logSigmoidToeCoefficient: f32,
+    sigmoidShoulderCoefficient: f32,
+    rgbLogSigmoidBlackHueRetention: f32,
+    rgbLogSigmoidWhiteHueRetention: f32,
+    linearCompressionStart: f32,
+    logSigmoidMaximumLogCoordinate: f32,
+    logSigmoidOutputPeak: f32,
+    rgbGamutExpansion: f32,
+    linearSlope: f32,
+    linearOutputPeak: f32,
+    rgbHueRetention: f32,
+    linearCurvePeak: f32,
 }
 
 @group(0) @binding(0) var inputTexture: texture_2d<f32>;
@@ -35,7 +37,7 @@ struct DrtParameters {
 @group(0) @binding(2) var outputTexture: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(3) var<uniform> parameters: DrtParameters;
 
-const AGX_NEUTRAL_WEIGHTS: vec3f = vec3f(
+const NEUTRAL_WEIGHTS: vec3f = vec3f(
     0.2120053547549465,
     0.3921825078090138,
     0.3958121374360396);
@@ -74,46 +76,46 @@ fn hsvToRgb(hsv: vec3f) -> vec3f {
     return hsv.z * mix(vec3f(1.0), primary, hsv.y);
 }
 
-fn agxInset(color: vec3f) -> vec3f {
-    let neutral: f32 = dot(color, AGX_NEUTRAL_WEIGHTS);
-    return mix(color, vec3f(neutral), parameters.agxGamutCompression);
+fn toVirtualRgb(color: vec3f) -> vec3f {
+    let neutral: f32 = dot(color, NEUTRAL_WEIGHTS);
+    return mix(color, vec3f(neutral), parameters.logSigmoidGamutCompression);
 }
 
-fn agxOutset(color: vec3f) -> vec3f {
-    let neutral: f32 = dot(color, AGX_NEUTRAL_WEIGHTS);
-    return (color - parameters.agxGamutCompression * vec3f(neutral))
-        / (1.0 - parameters.agxGamutCompression);
+fn fromVirtualRgb(color: vec3f) -> vec3f {
+    let neutral: f32 = dot(color, NEUTRAL_WEIGHTS);
+    return (color - parameters.logSigmoidGamutCompression * vec3f(neutral))
+        / (1.0 - parameters.logSigmoidGamutCompression);
 }
 
-fn agxCurveComponent(value: f32) -> f32 {
-    let toe: bool = value <= parameters.agxInputPivot;
-    let power: f32 = select(parameters.agxShoulderPower, parameters.agxToePower, toe);
-    let coefficient: f32 = select(parameters.agxShoulderA, parameters.agxToeA, toe);
-    let distance: f32 = value - parameters.agxInputPivot;
-    return parameters.agxOutputPivot
-        + parameters.agxPivotSlope * distance
+fn logSigmoidComponent(value: f32) -> f32 {
+    let toe: bool = value <= parameters.logSigmoidInputPivot;
+    let power: f32 = select(parameters.sigmoidShoulderPower, parameters.logSigmoidToePower, toe);
+    let coefficient: f32 = select(parameters.sigmoidShoulderCoefficient, parameters.logSigmoidToeCoefficient, toe);
+    let distance: f32 = value - parameters.logSigmoidInputPivot;
+    return parameters.logSigmoidOutputPivot
+        + parameters.logSigmoidPivotSlope * distance
             * pow(1.0 + coefficient * pow(abs(distance), power), -1.0 / power);
 }
 
-fn agxCurve(value: vec3f) -> vec3f {
+fn logSigmoidCurve(value: vec3f) -> vec3f {
     return vec3f(
-        agxCurveComponent(value.x),
-        agxCurveComponent(value.y),
-        agxCurveComponent(value.z));
+        logSigmoidComponent(value.x),
+        logSigmoidComponent(value.y),
+        logSigmoidComponent(value.z));
 }
 
-fn agxToneScale(linearRec709: vec3f) -> vec3f {
+fn rgbLogSigmoid(linearRec709: vec3f) -> vec3f {
     // TODO: Known issue: a strong per-channel shoulder can produce perceptual
     // banding across high-to-low-saturation highlight transitions. The current
     // 5.2 default is an accepted artistic compromise pending a color-trajectory
     // model that is independent from the tone curve.
-    let inset: vec3f = agxInset(linearRec709);
+    let inset: vec3f = toVirtualRgb(linearRec709);
     let normalizedLog: vec3f = clamp(
-        (log2(inset) - vec3f(parameters.agxMinimumLog2))
-            * parameters.agxInverseDynamicRange,
+        (log2(inset) - vec3f(parameters.logSigmoidMinimumLog2))
+            * parameters.logSigmoidInverseDynamicRange,
         vec3f(0.0),
-        vec3f(parameters.agxMaximumLogCoordinate));
-    return agxOutset(agxCurve(normalizedLog));
+        vec3f(parameters.logSigmoidMaximumLogCoordinate));
+    return fromVirtualRgb(logSigmoidCurve(normalizedLog));
 }
 
 fn adjustHsv(originalLinear: vec3f, mappedDisplay: vec3f) -> vec3f {
@@ -121,12 +123,12 @@ fn adjustHsv(originalLinear: vec3f, mappedDisplay: vec3f) -> vec3f {
     let originalDisplay: vec3f = pow(originalLinear, vec3f(1.0 / 2.2));
     let originalHsv: vec3f = rgbToHsv(originalDisplay);
     var mappedHsv: vec3f = rgbToHsv(mappedDisplay);
-    let normalizedValue: f32 = clamp(mappedHsv.z / parameters.agxOutputPeak, 0.0, 1.0);
+    let normalizedValue: f32 = clamp(mappedHsv.z / parameters.logSigmoidOutputPeak, 0.0, 1.0);
 
     if (originalHsv.y > 1.0e-7 && mappedHsv.y > 1.0e-7) {
         let retention: f32 = mix(
-            parameters.agxBlackHueRetention,
-            parameters.agxWhiteHueRetention,
+            parameters.rgbLogSigmoidBlackHueRetention,
+            parameters.rgbLogSigmoidWhiteHueRetention,
             normalizedValue);
         var hueOffset: f32 = originalHsv.x - mappedHsv.x;
         hueOffset -= floor(hueOffset + 0.5);
@@ -190,11 +192,11 @@ fn prepareOutput(source: vec3f, mapped: vec3f) -> vec3f {
         if (any(mapped < vec3f(0.0))) {
             return vec3f(0.0, 0.25, 1.0);
         }
-        if (any(mapped > vec3f(parameters.agxOutputPeak))) {
+        if (any(mapped > vec3f(parameters.logSigmoidOutputPeak))) {
             return vec3f(1.0, 0.05, 0.0);
         }
     }
-    return clamp(mapped, vec3f(0.0), vec3f(parameters.agxOutputPeak));
+    return clamp(mapped, vec3f(0.0), vec3f(parameters.logSigmoidOutputPeak));
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -204,6 +206,6 @@ fn main(@builtin(global_invocation_id) dispatchThreadId: vec3u) {
     let uv: vec2f = (vec2f(pixel) + vec2f(0.5)) / vec2f(f32(parameters.width), f32(parameters.height));
     let ap0: vec3f = textureSampleLevel(inputTexture, inputSampler, uv, 0.0).rgb * parameters.exposureMultiplier;
     let originalLinear: vec3f = max(acesAp0ToRec709(ap0), vec3f(0.0));
-    let mapped: vec3f = adjustHsv(originalLinear, agxToneScale(originalLinear));
+    let mapped: vec3f = adjustHsv(originalLinear, rgbLogSigmoid(originalLinear));
     textureStore(outputTexture, vec2i(pixel), vec4f(prepareOutput(ap0, mapped), 1.0));
 }

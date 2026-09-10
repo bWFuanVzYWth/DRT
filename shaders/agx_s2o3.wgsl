@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// AgX-S2O3 analytical display transform by linlin, ported from the author's implementation:
+// AgX-S2O3 reference port by linlin, preserving the original transform structure.
+// This is a port, not the original AgX author's Python implementation.
+// This WGSL version was ported from linlin's GLSL reference port:
 // C:/WorkSpace/AgX/agx.glsl at commit 0796e1b4aa9df94152eff353bae131eae1a4c087.
 // Copyright (c) 2024 linlin.
 // Input: scene-linear ACES2065-1 (AP0). Output: display-encoded BT.709/sRGB.
@@ -10,26 +12,26 @@ struct DrtParameters {
     width: u32,
     height: u32,
     showAnomalies: u32,
-    agxMinimumLog2: f32,
-    agxInverseDynamicRange: f32,
-    agxInputPivot: f32,
-    agxOutputPivot: f32,
-    agxPivotSlope: f32,
-    agxToePower: f32,
-    agxShoulderPower: f32,
-    agxGamutCompression: f32,
-    agxToeA: f32,
-    agxShoulderA: f32,
-    agxBlackHueRetention: f32,
-    agxWhiteHueRetention: f32,
-    reinhardCompressionStart: f32,
-    agxMaximumLogCoordinate: f32,
-    agxOutputPeak: f32,
-    reinhardGamutExpansion: f32,
-    reinhardLinearSlope: f32,
-    reinhardOutputPeak: f32,
-    reinhardHueRetention: f32,
-    reinhardCurvePeak: f32,
+    logSigmoidMinimumLog2: f32,
+    logSigmoidInverseDynamicRange: f32,
+    logSigmoidInputPivot: f32,
+    logSigmoidOutputPivot: f32,
+    logSigmoidPivotSlope: f32,
+    logSigmoidToePower: f32,
+    sigmoidShoulderPower: f32,
+    logSigmoidGamutCompression: f32,
+    logSigmoidToeCoefficient: f32,
+    sigmoidShoulderCoefficient: f32,
+    rgbLogSigmoidBlackHueRetention: f32,
+    rgbLogSigmoidWhiteHueRetention: f32,
+    linearCompressionStart: f32,
+    logSigmoidMaximumLogCoordinate: f32,
+    logSigmoidOutputPeak: f32,
+    rgbGamutExpansion: f32,
+    linearSlope: f32,
+    linearOutputPeak: f32,
+    rgbHueRetention: f32,
+    linearCurvePeak: f32,
 }
 
 @group(0) @binding(0) var inputTexture: texture_2d<f32>;
@@ -51,22 +53,22 @@ const AGX_NEUTRAL_WEIGHTS: vec3f = vec3f(
 
 fn agxInset(color: vec3f) -> vec3f {
     let neutral: f32 = dot(color, AGX_NEUTRAL_WEIGHTS);
-    return mix(color, vec3f(neutral), parameters.agxGamutCompression);
+    return mix(color, vec3f(neutral), parameters.logSigmoidGamutCompression);
 }
 
 fn agxOutset(color: vec3f) -> vec3f {
     let neutral: f32 = dot(color, AGX_NEUTRAL_WEIGHTS);
-    return (color - parameters.agxGamutCompression * vec3f(neutral))
-        / (1.0 - parameters.agxGamutCompression);
+    return (color - parameters.logSigmoidGamutCompression * vec3f(neutral))
+        / (1.0 - parameters.logSigmoidGamutCompression);
 }
 
 fn agxCurveComponent(value: f32) -> f32 {
-    let toe: bool = value <= parameters.agxInputPivot;
-    let power: f32 = select(parameters.agxShoulderPower, parameters.agxToePower, toe);
-    let coefficient: f32 = select(parameters.agxShoulderA, parameters.agxToeA, toe);
-    let distance: f32 = value - parameters.agxInputPivot;
-    return parameters.agxOutputPivot
-        + parameters.agxPivotSlope * distance
+    let toe: bool = value <= parameters.logSigmoidInputPivot;
+    let power: f32 = select(parameters.sigmoidShoulderPower, parameters.logSigmoidToePower, toe);
+    let coefficient: f32 = select(parameters.sigmoidShoulderCoefficient, parameters.logSigmoidToeCoefficient, toe);
+    let distance: f32 = value - parameters.logSigmoidInputPivot;
+    return parameters.logSigmoidOutputPivot
+        + parameters.logSigmoidPivotSlope * distance
             * pow(1.0 + coefficient * pow(abs(distance), power), -1.0 / power);
 }
 
@@ -84,8 +86,8 @@ fn agxS2O3(linearRec709: vec3f) -> vec3f {
     // here before taking log2.
     let inset: vec3f = agxInset(max(linearRec709, vec3f(0.0)));
     let normalizedLog: vec3f = clamp(
-        (log2(inset) - vec3f(parameters.agxMinimumLog2))
-            * parameters.agxInverseDynamicRange,
+        (log2(inset) - vec3f(parameters.logSigmoidMinimumLog2))
+            * parameters.logSigmoidInverseDynamicRange,
         vec3f(0.0),
         vec3f(1.0));
     return agxOutset(agxCurve(normalizedLog));

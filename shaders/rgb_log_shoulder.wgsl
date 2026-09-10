@@ -1,4 +1,7 @@
-// Experimental AgX-style virtual-gamut transform around a unified SDR/HDR Reinhard curve.
+// RGB Log Shoulder: virtual RGB coordinates, a per-channel linear segment joined
+// to a log1p sigmoid shoulder, and optional HSV hue repair after sRGB encoding.
+// The segments share their value and tangent. The shoulder uses the AgX sigmoid
+// form, while the full transform preserves a linear segment below the join.
 // Input: scene-linear ACES2065-1 (AP0).
 // Output: display-encoded extended sRGB (1.0 is SDR reference white).
 
@@ -8,26 +11,26 @@ struct DrtParameters {
     width: u32,
     height: u32,
     showAnomalies: u32,
-    agxMinimumLog2: f32,
-    agxInverseDynamicRange: f32,
-    agxInputPivot: f32,
-    agxOutputPivot: f32,
-    agxPivotSlope: f32,
-    agxToePower: f32,
-    agxShoulderPower: f32,
-    agxGamutCompression: f32,
-    agxToeA: f32,
-    agxShoulderA: f32,
-    agxBlackHueRetention: f32,
-    agxWhiteHueRetention: f32,
-    reinhardCompressionStart: f32,
-    agxMaximumLogCoordinate: f32,
-    agxOutputPeak: f32,
-    reinhardGamutExpansion: f32,
-    reinhardLinearSlope: f32,
-    reinhardOutputPeak: f32,
-    reinhardHueRetention: f32,
-    reinhardCurvePeak: f32,
+    logSigmoidMinimumLog2: f32,
+    logSigmoidInverseDynamicRange: f32,
+    logSigmoidInputPivot: f32,
+    logSigmoidOutputPivot: f32,
+    logSigmoidPivotSlope: f32,
+    logSigmoidToePower: f32,
+    sigmoidShoulderPower: f32,
+    logSigmoidGamutCompression: f32,
+    logSigmoidToeCoefficient: f32,
+    sigmoidShoulderCoefficient: f32,
+    rgbLogSigmoidBlackHueRetention: f32,
+    rgbLogSigmoidWhiteHueRetention: f32,
+    linearCompressionStart: f32,
+    logSigmoidMaximumLogCoordinate: f32,
+    logSigmoidOutputPeak: f32,
+    rgbGamutExpansion: f32,
+    linearSlope: f32,
+    linearOutputPeak: f32,
+    rgbHueRetention: f32,
+    linearCurvePeak: f32,
 }
 
 @group(0) @binding(0) var inputTexture: texture_2d<f32>;
@@ -51,32 +54,43 @@ fn toExpandedGamutCoordinates(color: vec3f) -> vec3f {
     // Moving the virtual primaries outward makes the coordinates of an
     // unchanged Rec.709 color contract toward the neutral axis.
     let neutral: f32 = dot(color, NEUTRAL_WEIGHTS);
-    return mix(color, vec3f(neutral), parameters.reinhardGamutExpansion);
+    return mix(color, vec3f(neutral), parameters.rgbGamutExpansion);
 }
 
 fn fromExpandedGamutCoordinates(color: vec3f) -> vec3f {
     // The neutral projection is invariant, making this the exact inverse of
     // toExpandedGamutCoordinates before the intervening nonlinear curve.
     let neutral: f32 = dot(color, NEUTRAL_WEIGHTS);
-    return (color - parameters.reinhardGamutExpansion * vec3f(neutral))
-        / (1.0 - parameters.reinhardGamutExpansion);
+    return (color - parameters.rgbGamutExpansion * vec3f(neutral))
+        / (1.0 - parameters.rgbGamutExpansion);
 }
 
-fn reinhard(color: vec3f) -> vec3f {
-    let linearSlope: f32 = parameters.reinhardLinearSlope;
-    let compressionStart: f32 = parameters.reinhardCompressionStart;
-    let startOutput: f32 = linearSlope * compressionStart;
-    let shoulderExtent: f32 = parameters.reinhardCurvePeak - startOutput;
-    // The shoulder is unused below the join; keep its denominator positive there.
-    let distance: vec3f = max(color - vec3f(compressionStart), vec3f(0.0));
-    let tangentDistance: vec3f = linearSlope * distance;
-    let linear: vec3f = linearSlope * color;
-    let shoulder: vec3f = vec3f(startOutput)
-        + tangentDistance / (vec3f(1.0) + tangentDistance / shoulderExtent);
-    return vec3f(
-        select(shoulder.x, linear.x, color.x <= compressionStart),
-        select(shoulder.y, linear.y, color.y <= compressionStart),
-        select(shoulder.z, linear.z, color.z <= compressionStart));
+fn logDistance(distance: f32) -> f32 {
+    // ln(1+x) = ln(2)*log2(1+x). Avoid cancellation close to the join.
+    if (distance < 0.001) {
+        return distance * (1.0 + distance * (-0.5 + distance / 3.0));
+    }
+    return 0.69314718056 * log2(1.0 + distance);
+}
+
+fn logShoulderComponent(value: f32) -> f32 {
+    let slope = parameters.linearSlope;
+    let start = parameters.linearCompressionStart;
+    if (value <= start) {
+        return slope * value;
+    }
+    let join = slope * start;
+    let extent = parameters.linearOutputPeak - join;
+    // Normalize the remaining output room before entering log space. This
+    // supports a zero start and HDR while retaining the incoming linear slope.
+    let distance = logDistance(slope * (value - start) / extent);
+    let power = parameters.sigmoidShoulderPower;
+    return join + extent * distance
+        * pow(1.0 + parameters.sigmoidShoulderCoefficient * pow(distance, power), -1.0 / power);
+}
+
+fn logShoulder(color: vec3f) -> vec3f {
+    return vec3f(logShoulderComponent(color.x), logShoulderComponent(color.y), logShoulderComponent(color.z));
 }
 
 fn encodeSrgb(linearRgb: vec3f) -> vec3f {
@@ -117,7 +131,7 @@ fn hsvToRgb(hsv: vec3f) -> vec3f {
 }
 
 fn protectHsvHue(originalLinear: vec3f, mappedDisplay: vec3f) -> vec3f {
-    if (parameters.reinhardHueRetention <= 0.0) {
+    if (parameters.rgbHueRetention <= 0.0) {
         return mappedDisplay;
     }
     let originalHsv: vec3f = rgbToHsv(encodeSrgb(originalLinear));
@@ -128,7 +142,7 @@ fn protectHsvHue(originalLinear: vec3f, mappedDisplay: vec3f) -> vec3f {
     var hueOffset: f32 = originalHsv.x - mappedHsv.x;
     hueOffset -= floor(hueOffset + 0.5);
     mappedHsv.x = fract(
-        mappedHsv.x + parameters.reinhardHueRetention * hueOffset);
+        mappedHsv.x + parameters.rgbHueRetention * hueOffset);
     return hsvToRgb(mappedHsv);
 }
 
@@ -181,7 +195,7 @@ fn prepareOutput(source: vec3f, mapped: vec3f) -> vec3f {
     if (positiveInfinity || negativeInfinity) {
         return anomalyColor(positiveInfinity, negativeInfinity);
     }
-    let encodedOutputPeak: f32 = encodeSrgb(vec3f(parameters.reinhardOutputPeak)).x;
+    let encodedOutputPeak: f32 = encodeSrgb(vec3f(parameters.linearOutputPeak)).x;
     if (parameters.showAnomalies != 0) {
         if (any(mapped < vec3f(0.0))) {
             return vec3f(0.0, 0.25, 1.0);
@@ -202,7 +216,7 @@ fn main(@builtin(global_invocation_id) dispatchThreadId: vec3u) {
         * parameters.exposureMultiplier;
     let linearRec709: vec3f = max(acesAp0ToRec709(ap0), vec3f(0.0));
     let working: vec3f = toExpandedGamutCoordinates(linearRec709);
-    let mappedLinear: vec3f = fromExpandedGamutCoordinates(reinhard(working));
+    let mappedLinear: vec3f = fromExpandedGamutCoordinates(logShoulder(working));
     var mappedDisplay: vec3f = encodeSrgb(mappedLinear);
     mappedDisplay = protectHsvHue(linearRec709, mappedDisplay);
     textureStore(outputTexture, vec2i(pixel), vec4f(prepareOutput(ap0, mappedDisplay), 1.0));

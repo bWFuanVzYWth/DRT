@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Oklab DRT developed by this project's authors.
+// Oklab Reinhard DRT developed by this project's authors.
+// Maps L^3 with a linear segment and Reinhard shoulder, then softly compresses
+// chroma against the gamut boundary along a fixed Oklab hue direction.
 // Input: scene-linear ACES2065-1 (AP0). Output: display-encoded sRGB.
 
 // Keep field order in sync with Parameters in src/gpu.rs.
@@ -8,26 +10,26 @@ struct DrtParameters {
     width: u32,
     height: u32,
     showAnomalies: u32,
-    agxMinimumLog2: f32,
-    agxInverseDynamicRange: f32,
-    agxInputPivot: f32,
-    agxOutputPivot: f32,
-    agxPivotSlope: f32,
-    agxToePower: f32,
-    agxShoulderPower: f32,
-    agxGamutCompression: f32,
-    agxToeA: f32,
-    agxShoulderA: f32,
-    agxBlackHueRetention: f32,
-    agxWhiteHueRetention: f32,
-    reinhardCompressionStart: f32,
-    agxMaximumLogCoordinate: f32,
-    agxOutputPeak: f32,
-    reinhardGamutExpansion: f32,
-    reinhardLinearSlope: f32,
-    reinhardOutputPeak: f32,
-    reinhardHueRetention: f32,
-    reinhardCurvePeak: f32,
+    logSigmoidMinimumLog2: f32,
+    logSigmoidInverseDynamicRange: f32,
+    logSigmoidInputPivot: f32,
+    logSigmoidOutputPivot: f32,
+    logSigmoidPivotSlope: f32,
+    logSigmoidToePower: f32,
+    sigmoidShoulderPower: f32,
+    logSigmoidGamutCompression: f32,
+    logSigmoidToeCoefficient: f32,
+    sigmoidShoulderCoefficient: f32,
+    rgbLogSigmoidBlackHueRetention: f32,
+    rgbLogSigmoidWhiteHueRetention: f32,
+    linearCompressionStart: f32,
+    logSigmoidMaximumLogCoordinate: f32,
+    logSigmoidOutputPeak: f32,
+    rgbGamutExpansion: f32,
+    linearSlope: f32,
+    linearOutputPeak: f32,
+    rgbHueRetention: f32,
+    linearCurvePeak: f32,
 }
 
 @group(0) @binding(0) var inputTexture: texture_2d<f32>;
@@ -35,10 +37,10 @@ struct DrtParameters {
 @group(0) @binding(2) var outputTexture: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(3) var<uniform> parameters: DrtParameters;
 
-const OKLAB_DRT_RGB_HEADROOM: f32 = 0.99999;
-const OKLAB_DRT_RED_ROW: vec3f = vec3f(4.0767416621, -3.3077115913, 0.2309699292);
-const OKLAB_DRT_GREEN_ROW: vec3f = vec3f(-1.2684380046, 2.6097574011, -0.3413193965);
-const OKLAB_DRT_BLUE_ROW: vec3f = vec3f(-0.0041960863, -0.7034186147, 1.7076147010);
+const OKLAB_REINHARD_RGB_HEADROOM: f32 = 0.99999;
+const OKLAB_REINHARD_RED_ROW: vec3f = vec3f(4.0767416621, -3.3077115913, 0.2309699292);
+const OKLAB_REINHARD_GREEN_ROW: vec3f = vec3f(-1.2684380046, 2.6097574011, -0.3413193965);
+const OKLAB_REINHARD_BLUE_ROW: vec3f = vec3f(-0.0041960863, -0.7034186147, 1.7076147010);
 
 fn encodeSrgb(linearRgb: vec3f) -> vec3f {
     let cutoff: vec3<bool> = linearRgb < vec3f(0.0031308);
@@ -67,23 +69,23 @@ fn oklabToRgb(color: vec3f) -> vec3f {
     let sRoot: f32 = color.x - 0.0894841775 * color.y - 1.2914855480 * color.z;
     let lms: vec3f = vec3f(lRoot * lRoot * lRoot, mRoot * mRoot * mRoot, sRoot * sRoot * sRoot);
     return vec3f(
-        dot(OKLAB_DRT_RED_ROW, lms),
-        dot(OKLAB_DRT_GREEN_ROW, lms),
-        dot(OKLAB_DRT_BLUE_ROW, lms));
+        dot(OKLAB_REINHARD_RED_ROW, lms),
+        dot(OKLAB_REINHARD_GREEN_ROW, lms),
+        dot(OKLAB_REINHARD_BLUE_ROW, lms));
 }
 
 fn mapLightness(lightness: f32) -> f32 {
     // Apply the linear segment and tangent-continuous Reinhard shoulder in L^3,
     // then return to Oklab lightness for gamut mapping.
     let brightness: f32 = lightness * lightness * lightness;
-    let linearSlope: f32 = parameters.reinhardLinearSlope;
-    let compressionStart: f32 = parameters.reinhardCompressionStart;
+    let linearSlope: f32 = parameters.linearSlope;
+    let compressionStart: f32 = parameters.linearCompressionStart;
     var mappedBrightness: f32;
     if (brightness <= compressionStart) {
         mappedBrightness = linearSlope * brightness;
     } else {
         let startOutput: f32 = linearSlope * compressionStart;
-        let shoulderExtent: f32 = parameters.reinhardCurvePeak - startOutput;
+        let shoulderExtent: f32 = parameters.linearCurvePeak - startOutput;
         let tangentDistance: f32 = linearSlope * (brightness - compressionStart);
         mappedBrightness = startOutput
             + tangentDistance / (1.0 + tangentDistance / shoulderExtent);
@@ -107,13 +109,13 @@ fn maxSaturation(hue: vec2f, direction: vec3f) -> f32 {
     var rgbRow: vec3f;
     if (-1.88170328 * hue.x - 0.80936493 * hue.y > 1.0) {
         k0 = 1.19086277; k1 = 1.76576728; k2 = 0.59662641; k3 = 0.75515197; k4 = 0.56771245;
-        rgbRow = OKLAB_DRT_RED_ROW;
+        rgbRow = OKLAB_REINHARD_RED_ROW;
     } else if (1.81444104 * hue.x - 1.19445276 * hue.y > 1.0) {
         k0 = 0.73956515; k1 = -0.45954404; k2 = 0.08285427; k3 = 0.12541070; k4 = 0.14503204;
-        rgbRow = OKLAB_DRT_GREEN_ROW;
+        rgbRow = OKLAB_REINHARD_GREEN_ROW;
     } else {
         k0 = 1.35733652; k1 = -0.00915799; k2 = -1.15130210; k3 = -0.50559606; k4 = 0.00692167;
-        rgbRow = OKLAB_DRT_BLUE_ROW;
+        rgbRow = OKLAB_REINHARD_BLUE_ROW;
     }
 
     let saturation: f32 = k0 + k1 * hue.x + k2 * hue.y + k3 * hue.x * hue.x + k4 * hue.x * hue.y;
@@ -145,9 +147,9 @@ fn cuspLightness(saturation: f32, direction: vec3f) -> f32 {
     let roots: vec3f = vec3f(1.0) + saturation * direction;
     let lms: vec3f = roots * roots * roots;
     let rgb: vec3f = vec3f(
-        dot(OKLAB_DRT_RED_ROW, lms),
-        dot(OKLAB_DRT_GREEN_ROW, lms),
-        dot(OKLAB_DRT_BLUE_ROW, lms));
+        dot(OKLAB_REINHARD_RED_ROW, lms),
+        dot(OKLAB_REINHARD_GREEN_ROW, lms),
+        dot(OKLAB_REINHARD_BLUE_ROW, lms));
     return pow(1.0 / max(rgb.r, max(rgb.g, rgb.b)), 1.0 / 3.0);
 }
 
@@ -156,9 +158,9 @@ fn refineUpperChroma(chroma: f32, lightness: f32, direction: vec3f) -> f32 {
     let lms: vec3f = roots * roots * roots;
     let firstLms: vec3f = 3.0 * direction * roots * roots;
     let secondLms: vec3f = 6.0 * direction * direction * roots;
-    let rgb: vec3f = vec3f(dot(OKLAB_DRT_RED_ROW, lms), dot(OKLAB_DRT_GREEN_ROW, lms), dot(OKLAB_DRT_BLUE_ROW, lms));
-    let firstRgb: vec3f = vec3f(dot(OKLAB_DRT_RED_ROW, firstLms), dot(OKLAB_DRT_GREEN_ROW, firstLms), dot(OKLAB_DRT_BLUE_ROW, firstLms));
-    let secondRgb: vec3f = vec3f(dot(OKLAB_DRT_RED_ROW, secondLms), dot(OKLAB_DRT_GREEN_ROW, secondLms), dot(OKLAB_DRT_BLUE_ROW, secondLms));
+    let rgb: vec3f = vec3f(dot(OKLAB_REINHARD_RED_ROW, lms), dot(OKLAB_REINHARD_GREEN_ROW, lms), dot(OKLAB_REINHARD_BLUE_ROW, lms));
+    let firstRgb: vec3f = vec3f(dot(OKLAB_REINHARD_RED_ROW, firstLms), dot(OKLAB_REINHARD_GREEN_ROW, firstLms), dot(OKLAB_REINHARD_BLUE_ROW, firstLms));
+    let secondRgb: vec3f = vec3f(dot(OKLAB_REINHARD_RED_ROW, secondLms), dot(OKLAB_REINHARD_GREEN_ROW, secondLms), dot(OKLAB_REINHARD_BLUE_ROW, secondLms));
     let f: vec3f = rgb - vec3f(1.0);
     let denominator: vec3f = firstRgb * firstRgb - 0.5 * f * secondRgb;
     let reciprocalStep: vec3f = firstRgb / denominator;
@@ -230,7 +232,7 @@ fn mapLinearRgb(color: vec3f) -> vec3f {
     let outputLightness: f32 = mapLightness(oklab.x);
     let inputChroma: f32 = length(oklab.yz);
     if (inputChroma <= 1.0e-8) {
-        return OKLAB_DRT_RGB_HEADROOM * oklabToRgb(vec3f(outputLightness, 0.0, 0.0));
+        return OKLAB_REINHARD_RGB_HEADROOM * oklabToRgb(vec3f(outputLightness, 0.0, 0.0));
     }
     let hue: vec2f = oklab.yz / inputChroma;
     let direction: vec3f = rootDirection(hue);
@@ -239,7 +241,7 @@ fn mapLinearRgb(color: vec3f) -> vec3f {
     let desiredSaturation: f32 = inputSaturation * chromaRetention(outputLightness);
     let cap: f32 = saturationCap(outputLightness, maximumSaturation, direction);
     let outputSaturation: f32 = softMin(desiredSaturation, cap, roundingPower(outputLightness));
-    return OKLAB_DRT_RGB_HEADROOM * oklabToRgb(vec3f(
+    return OKLAB_REINHARD_RGB_HEADROOM * oklabToRgb(vec3f(
         outputLightness, outputLightness * outputSaturation * hue));
 }
 
