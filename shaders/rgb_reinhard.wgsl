@@ -19,8 +19,7 @@ struct DrtParameters {
     logSigmoidGamutCompression: f32,
     logSigmoidToeCoefficient: f32,
     sigmoidShoulderCoefficient: f32,
-    rgbLogSigmoidBlackHueRetention: f32,
-    rgbLogSigmoidWhiteHueRetention: f32,
+    rgbLogSigmoidHueRetention: f32,
     linearCompressionStart: f32,
     logSigmoidMaximumLogCoordinate: f32,
     logSigmoidOutputPeak: f32,
@@ -29,6 +28,10 @@ struct DrtParameters {
     linearOutputPeak: f32,
     rgbHueRetention: f32,
     linearCurvePeak: f32,
+    oklabHighlightChromaPower: f32,
+    oklabGamutRoundingPower: f32,
+    oklabEndpointCompressionPower: f32,
+    oklabMidtoneCompressionPower: f32,
 }
 
 @group(0) @binding(0) var inputTexture: texture_2d<f32>;

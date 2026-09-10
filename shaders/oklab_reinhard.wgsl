@@ -20,8 +20,7 @@ struct DrtParameters {
     logSigmoidGamutCompression: f32,
     logSigmoidToeCoefficient: f32,
     sigmoidShoulderCoefficient: f32,
-    rgbLogSigmoidBlackHueRetention: f32,
-    rgbLogSigmoidWhiteHueRetention: f32,
+    rgbLogSigmoidHueRetention: f32,
     linearCompressionStart: f32,
     logSigmoidMaximumLogCoordinate: f32,
     logSigmoidOutputPeak: f32,
@@ -30,6 +29,10 @@ struct DrtParameters {
     linearOutputPeak: f32,
     rgbHueRetention: f32,
     linearCurvePeak: f32,
+    oklabHighlightChromaPower: f32,
+    oklabGamutRoundingPower: f32,
+    oklabEndpointCompressionPower: f32,
+    oklabMidtoneCompressionPower: f32,
 }
 
 @group(0) @binding(0) var inputTexture: texture_2d<f32>;
@@ -182,18 +185,6 @@ fn softMin(value: f32, limit: f32, power: f32) -> f32 {
     return lower * pow(1.0 + pow(ratio, power), -1.0 / power);
 }
 
-fn softMin4(value: f32, limit: f32) -> f32 {
-    if (value <= 0.0 || limit <= 0.0) {
-        return 0.0;
-    }
-    let lower: f32 = min(value, limit);
-    let higher: f32 = max(value, limit);
-    let ratio: f32 = lower / higher;
-    let ratio2: f32 = ratio * ratio;
-    let root: f32 = sqrt(1.0 + ratio2 * ratio2);
-    return lower * inverseSqrt(root);
-}
-
 fn saturationCap(lightness: f32, maximumSaturation: f32, direction: vec3f) -> f32 {
     if (lightness <= 0.0) {
         return maximumSaturation;
@@ -208,20 +199,18 @@ fn saturationCap(lightness: f32, maximumSaturation: f32, direction: vec3f) -> f3
     let t: f32 = clamp((lightness - cusp) / (1.0 - cusp), 0.0, 1.0);
     let shoulder: f32 = t * (1.0 - t);
     whiteChroma *= 1.0 - 0.0035 * 16.0 * shoulder * shoulder;
-    let roundedChroma: f32 = softMin4(blackChroma, whiteChroma);
+    let roundedChroma: f32 = softMin(blackChroma, whiteChroma, parameters.oklabGamutRoundingPower);
     return max(roundedChroma / lightness, 0.0);
 }
 
 fn chromaRetention(lightness: f32) -> f32 {
-    let lightness2: f32 = lightness * lightness;
-    let lightness4: f32 = lightness2 * lightness2;
-    let lightness8: f32 = lightness4 * lightness4;
-    return 1.0 - lightness8 * lightness4;
+    return 1.0 - pow(clamp(lightness, 0.0, 1.0), parameters.oklabHighlightChromaPower);
 }
 
 fn roundingPower(lightness: f32) -> f32 {
     let endpointDistance: f32 = lightness * (1.0 - lightness);
-    return 32.0 - 256.0 * endpointDistance * endpointDistance;
+    let midtoneWeight: f32 = clamp(16.0 * endpointDistance * endpointDistance, 0.0, 1.0);
+    return mix(parameters.oklabEndpointCompressionPower, parameters.oklabMidtoneCompressionPower, midtoneWeight);
 }
 
 fn mapLinearRgb(color: vec3f) -> vec3f {

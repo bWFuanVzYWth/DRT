@@ -1,5 +1,5 @@
 // RGB Log Sigmoid: a per-channel log2 curve in virtual RGB coordinates.
-// Below 18% gray, the curve encodes an exact linear-light segment analytically;
+// Below the adjustable join, the curve encodes an exact linear-light segment analytically;
 // above it, a tangent-matched AgX-form sigmoid shoulder compresses highlights.
 // Inset/outset and HSV hue repair can still change colored shadows.
 // Input: scene-linear ACES2065-1 (AP0).
@@ -21,8 +21,7 @@ struct DrtParameters {
     logSigmoidGamutCompression: f32,
     logSigmoidToeCoefficient: f32,
     sigmoidShoulderCoefficient: f32,
-    rgbLogSigmoidBlackHueRetention: f32,
-    rgbLogSigmoidWhiteHueRetention: f32,
+    rgbLogSigmoidHueRetention: f32,
     linearCompressionStart: f32,
     logSigmoidMaximumLogCoordinate: f32,
     logSigmoidOutputPeak: f32,
@@ -31,6 +30,10 @@ struct DrtParameters {
     linearOutputPeak: f32,
     rgbHueRetention: f32,
     linearCurvePeak: f32,
+    oklabHighlightChromaPower: f32,
+    oklabGamutRoundingPower: f32,
+    oklabEndpointCompressionPower: f32,
+    oklabMidtoneCompressionPower: f32,
 }
 
 @group(0) @binding(0) var inputTexture: texture_2d<f32>;
@@ -91,7 +94,7 @@ fn fromVirtualRgb(color: vec3f) -> vec3f {
 fn logSigmoidComponent(value: f32) -> f32 {
     let distance: f32 = value - parameters.logSigmoidInputPivot;
     if (distance <= 0.0) {
-        // F(u) = OETF(k * 0.18 * 2^((u - pivot) * dynamicRange)).
+        // F(u) = OETF(k * join * 2^((u - pivot) * dynamicRange)).
         // Decoding F recovers k*x; the host derives the shoulder's tangent
         // from this same expression, so value and first derivative agree.
         let linearPivot: f32 = decodeSrgb(vec3f(parameters.logSigmoidOutputPivot)).x;
@@ -137,16 +140,11 @@ fn adjustHsv(originalLinear: vec3f, mappedDisplay: vec3f) -> vec3f {
     let originalDisplay: vec3f = pow(originalLinear, vec3f(1.0 / 2.2));
     let originalHsv: vec3f = rgbToHsv(originalDisplay);
     var mappedHsv: vec3f = rgbToHsv(mappedDisplay);
-    let normalizedValue: f32 = clamp(mappedHsv.z / parameters.logSigmoidOutputPeak, 0.0, 1.0);
 
     if (originalHsv.y > 1.0e-7 && mappedHsv.y > 1.0e-7) {
-        let retention: f32 = mix(
-            parameters.rgbLogSigmoidBlackHueRetention,
-            parameters.rgbLogSigmoidWhiteHueRetention,
-            normalizedValue);
         var hueOffset: f32 = originalHsv.x - mappedHsv.x;
         hueOffset -= floor(hueOffset + 0.5);
-        mappedHsv.x = fract(mappedHsv.x + retention * hueOffset);
+        mappedHsv.x = fract(mappedHsv.x + parameters.rgbLogSigmoidHueRetention * hueOffset);
     }
 
     mappedHsv.y = clamp(mappedHsv.y, 0.0, 1.0);

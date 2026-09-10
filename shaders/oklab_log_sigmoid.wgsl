@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Oklab Log Shoulder DRT developed by this project's authors.
-// Maps L^3 with a linear segment and log1p sigmoid shoulder, then softly compresses
-// chroma against the gamut boundary along a fixed Oklab hue direction.
+// Oklab Log Sigmoid DRT developed by this project's authors.
+// Applies the RGB Log Sigmoid scalar curve to L^3: analytical linear shadows
+// and a tangent-matched log2 sigmoid shoulder. Decode its display signal before
+// returning to Oklab L; chroma compression follows the existing Oklab transforms.
 // Input: scene-linear ACES2065-1 (AP0). Output: display-encoded sRGB.
 
 // Keep field order in sync with Parameters in src/gpu.rs.
@@ -20,8 +21,7 @@ struct DrtParameters {
     logSigmoidGamutCompression: f32,
     logSigmoidToeCoefficient: f32,
     sigmoidShoulderCoefficient: f32,
-    rgbLogSigmoidBlackHueRetention: f32,
-    rgbLogSigmoidWhiteHueRetention: f32,
+    rgbLogSigmoidHueRetention: f32,
     linearCompressionStart: f32,
     logSigmoidMaximumLogCoordinate: f32,
     logSigmoidOutputPeak: f32,
@@ -30,6 +30,10 @@ struct DrtParameters {
     linearOutputPeak: f32,
     rgbHueRetention: f32,
     linearCurvePeak: f32,
+    oklabHighlightChromaPower: f32,
+    oklabGamutRoundingPower: f32,
+    oklabEndpointCompressionPower: f32,
+    oklabMidtoneCompressionPower: f32,
 }
 
 @group(0) @binding(0) var inputTexture: texture_2d<f32>;
@@ -37,10 +41,10 @@ struct DrtParameters {
 @group(0) @binding(2) var outputTexture: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(3) var<uniform> parameters: DrtParameters;
 
-const OKLAB_LOG_SHOULDER_RGB_HEADROOM: f32 = 0.99999;
-const OKLAB_LOG_SHOULDER_RED_ROW: vec3f = vec3f(4.0767416621, -3.3077115913, 0.2309699292);
-const OKLAB_LOG_SHOULDER_GREEN_ROW: vec3f = vec3f(-1.2684380046, 2.6097574011, -0.3413193965);
-const OKLAB_LOG_SHOULDER_BLUE_ROW: vec3f = vec3f(-0.0041960863, -0.7034186147, 1.7076147010);
+const OKLAB_LOG_SIGMOID_RGB_HEADROOM: f32 = 0.99999;
+const OKLAB_LOG_SIGMOID_RED_ROW: vec3f = vec3f(4.0767416621, -3.3077115913, 0.2309699292);
+const OKLAB_LOG_SIGMOID_GREEN_ROW: vec3f = vec3f(-1.2684380046, 2.6097574011, -0.3413193965);
+const OKLAB_LOG_SIGMOID_BLUE_ROW: vec3f = vec3f(-0.0041960863, -0.7034186147, 1.7076147010);
 
 fn encodeSrgb(linearRgb: vec3f) -> vec3f {
     let cutoff: vec3<bool> = linearRgb < vec3f(0.0031308);
@@ -69,40 +73,51 @@ fn oklabToRgb(color: vec3f) -> vec3f {
     let sRoot: f32 = color.x - 0.0894841775 * color.y - 1.2914855480 * color.z;
     let lms: vec3f = vec3f(lRoot * lRoot * lRoot, mRoot * mRoot * mRoot, sRoot * sRoot * sRoot);
     return vec3f(
-        dot(OKLAB_LOG_SHOULDER_RED_ROW, lms),
-        dot(OKLAB_LOG_SHOULDER_GREEN_ROW, lms),
-        dot(OKLAB_LOG_SHOULDER_BLUE_ROW, lms));
+        dot(OKLAB_LOG_SIGMOID_RED_ROW, lms),
+        dot(OKLAB_LOG_SIGMOID_GREEN_ROW, lms),
+        dot(OKLAB_LOG_SIGMOID_BLUE_ROW, lms));
 }
 
-fn logDistance(distance: f32) -> f32 {
-    // ln(1+x) = ln(2)*log2(1+x). Avoid cancellation close to the join.
-    if (distance < 0.001) {
-        return distance * (1.0 + distance * (-0.5 + distance / 3.0));
-    }
-    return 0.69314718056 * log2(1.0 + distance);
+fn decodeSrgb(encoded: vec3f) -> vec3f {
+    let lower: vec3f = encoded / 12.92;
+    let higher: vec3f = pow(max((encoded + vec3f(0.055)) / 1.055, vec3f(0.0)), vec3f(2.4));
+    return select(higher, lower, encoded <= vec3f(0.04045));
 }
 
-fn logShoulderComponent(value: f32) -> f32 {
-    let slope = parameters.linearSlope;
-    let start = parameters.linearCompressionStart;
-    if (value <= start) {
-        return slope * value;
+fn logSigmoidComponent(value: f32) -> f32 {
+    let distance: f32 = value - parameters.logSigmoidInputPivot;
+    if (distance <= 0.0) {
+        // F(u) = OETF(k * join * 2^((u - pivot) * dynamicRange)).
+        // Decoding F recovers k*x; the host derives the shoulder's tangent
+        // from this same expression, so value and first derivative agree.
+        let linearPivot: f32 = decodeSrgb(vec3f(parameters.logSigmoidOutputPivot)).x;
+        let linearValue: f32 = linearPivot
+            * exp2(distance / parameters.logSigmoidInverseDynamicRange);
+        return encodeSrgb(vec3f(linearValue)).x;
     }
-    let join = slope * start;
-    let extent = parameters.linearOutputPeak - join;
-    // Normalize the remaining output room before entering log space. This
-    // supports a zero start while retaining the incoming linear slope.
-    let distance = logDistance(slope * (value - start) / extent);
-    let power = parameters.sigmoidShoulderPower;
-    return join + extent * distance
-        * pow(1.0 + parameters.sigmoidShoulderCoefficient * pow(distance, power), -1.0 / power);
+    let power: f32 = parameters.sigmoidShoulderPower;
+    let coefficient: f32 = parameters.sigmoidShoulderCoefficient;
+    return parameters.logSigmoidOutputPivot
+        + parameters.logSigmoidPivotSlope * distance
+            * pow(1.0 + coefficient * pow(distance, power), -1.0 / power);
+}
+
+fn linearToLogSigmoidComponent(value: f32) -> f32 {
+    if (value <= 0.0) { return 0.0; }
+    // No lower log clamp: the coordinate origin is not a black floor.
+    let normalizedLog: f32 = min(
+        (log2(value) - parameters.logSigmoidMinimumLog2)
+            * parameters.logSigmoidInverseDynamicRange,
+        parameters.logSigmoidMaximumLogCoordinate);
+    return logSigmoidComponent(normalizedLog);
 }
 
 fn mapLightness(lightness: f32) -> f32 {
-    // Apply the tangent-continuous linear/log shoulder in L^3, then return
-    // to Oklab lightness for the same fixed-hue chroma mapping as Oklab Reinhard.
     let brightness: f32 = lightness * lightness * lightness;
-    return pow(logShoulderComponent(brightness), 1.0 / 3.0);
+    // The shared curve returns encoded sRGB, not Oklab lightness or linear L^3.
+    let signal: f32 = linearToLogSigmoidComponent(brightness);
+    let mappedBrightness: f32 = decodeSrgb(vec3f(signal)).x;
+    return pow(clamp(mappedBrightness, 0.0, 1.0), 1.0 / 3.0);
 }
 
 fn rootDirection(hue: vec2f) -> vec3f {
@@ -121,13 +136,13 @@ fn maxSaturation(hue: vec2f, direction: vec3f) -> f32 {
     var rgbRow: vec3f;
     if (-1.88170328 * hue.x - 0.80936493 * hue.y > 1.0) {
         k0 = 1.19086277; k1 = 1.76576728; k2 = 0.59662641; k3 = 0.75515197; k4 = 0.56771245;
-        rgbRow = OKLAB_LOG_SHOULDER_RED_ROW;
+        rgbRow = OKLAB_LOG_SIGMOID_RED_ROW;
     } else if (1.81444104 * hue.x - 1.19445276 * hue.y > 1.0) {
         k0 = 0.73956515; k1 = -0.45954404; k2 = 0.08285427; k3 = 0.12541070; k4 = 0.14503204;
-        rgbRow = OKLAB_LOG_SHOULDER_GREEN_ROW;
+        rgbRow = OKLAB_LOG_SIGMOID_GREEN_ROW;
     } else {
         k0 = 1.35733652; k1 = -0.00915799; k2 = -1.15130210; k3 = -0.50559606; k4 = 0.00692167;
-        rgbRow = OKLAB_LOG_SHOULDER_BLUE_ROW;
+        rgbRow = OKLAB_LOG_SIGMOID_BLUE_ROW;
     }
 
     let saturation: f32 = k0 + k1 * hue.x + k2 * hue.y + k3 * hue.x * hue.x + k4 * hue.x * hue.y;
@@ -159,9 +174,9 @@ fn cuspLightness(saturation: f32, direction: vec3f) -> f32 {
     let roots: vec3f = vec3f(1.0) + saturation * direction;
     let lms: vec3f = roots * roots * roots;
     let rgb: vec3f = vec3f(
-        dot(OKLAB_LOG_SHOULDER_RED_ROW, lms),
-        dot(OKLAB_LOG_SHOULDER_GREEN_ROW, lms),
-        dot(OKLAB_LOG_SHOULDER_BLUE_ROW, lms));
+        dot(OKLAB_LOG_SIGMOID_RED_ROW, lms),
+        dot(OKLAB_LOG_SIGMOID_GREEN_ROW, lms),
+        dot(OKLAB_LOG_SIGMOID_BLUE_ROW, lms));
     return pow(1.0 / max(rgb.r, max(rgb.g, rgb.b)), 1.0 / 3.0);
 }
 
@@ -170,9 +185,9 @@ fn refineUpperChroma(chroma: f32, lightness: f32, direction: vec3f) -> f32 {
     let lms: vec3f = roots * roots * roots;
     let firstLms: vec3f = 3.0 * direction * roots * roots;
     let secondLms: vec3f = 6.0 * direction * direction * roots;
-    let rgb: vec3f = vec3f(dot(OKLAB_LOG_SHOULDER_RED_ROW, lms), dot(OKLAB_LOG_SHOULDER_GREEN_ROW, lms), dot(OKLAB_LOG_SHOULDER_BLUE_ROW, lms));
-    let firstRgb: vec3f = vec3f(dot(OKLAB_LOG_SHOULDER_RED_ROW, firstLms), dot(OKLAB_LOG_SHOULDER_GREEN_ROW, firstLms), dot(OKLAB_LOG_SHOULDER_BLUE_ROW, firstLms));
-    let secondRgb: vec3f = vec3f(dot(OKLAB_LOG_SHOULDER_RED_ROW, secondLms), dot(OKLAB_LOG_SHOULDER_GREEN_ROW, secondLms), dot(OKLAB_LOG_SHOULDER_BLUE_ROW, secondLms));
+    let rgb: vec3f = vec3f(dot(OKLAB_LOG_SIGMOID_RED_ROW, lms), dot(OKLAB_LOG_SIGMOID_GREEN_ROW, lms), dot(OKLAB_LOG_SIGMOID_BLUE_ROW, lms));
+    let firstRgb: vec3f = vec3f(dot(OKLAB_LOG_SIGMOID_RED_ROW, firstLms), dot(OKLAB_LOG_SIGMOID_GREEN_ROW, firstLms), dot(OKLAB_LOG_SIGMOID_BLUE_ROW, firstLms));
+    let secondRgb: vec3f = vec3f(dot(OKLAB_LOG_SIGMOID_RED_ROW, secondLms), dot(OKLAB_LOG_SIGMOID_GREEN_ROW, secondLms), dot(OKLAB_LOG_SIGMOID_BLUE_ROW, secondLms));
     let f: vec3f = rgb - vec3f(1.0);
     let denominator: vec3f = firstRgb * firstRgb - 0.5 * f * secondRgb;
     let reciprocalStep: vec3f = firstRgb / denominator;
@@ -194,18 +209,6 @@ fn softMin(value: f32, limit: f32, power: f32) -> f32 {
     return lower * pow(1.0 + pow(ratio, power), -1.0 / power);
 }
 
-fn softMin4(value: f32, limit: f32) -> f32 {
-    if (value <= 0.0 || limit <= 0.0) {
-        return 0.0;
-    }
-    let lower: f32 = min(value, limit);
-    let higher: f32 = max(value, limit);
-    let ratio: f32 = lower / higher;
-    let ratio2: f32 = ratio * ratio;
-    let root: f32 = sqrt(1.0 + ratio2 * ratio2);
-    return lower * inverseSqrt(root);
-}
-
 fn saturationCap(lightness: f32, maximumSaturation: f32, direction: vec3f) -> f32 {
     if (lightness <= 0.0) {
         return maximumSaturation;
@@ -220,20 +223,18 @@ fn saturationCap(lightness: f32, maximumSaturation: f32, direction: vec3f) -> f3
     let t: f32 = clamp((lightness - cusp) / (1.0 - cusp), 0.0, 1.0);
     let shoulder: f32 = t * (1.0 - t);
     whiteChroma *= 1.0 - 0.0035 * 16.0 * shoulder * shoulder;
-    let roundedChroma: f32 = softMin4(blackChroma, whiteChroma);
+    let roundedChroma: f32 = softMin(blackChroma, whiteChroma, parameters.oklabGamutRoundingPower);
     return max(roundedChroma / lightness, 0.0);
 }
 
 fn chromaRetention(lightness: f32) -> f32 {
-    let lightness2: f32 = lightness * lightness;
-    let lightness4: f32 = lightness2 * lightness2;
-    let lightness8: f32 = lightness4 * lightness4;
-    return 1.0 - lightness8 * lightness4;
+    return 1.0 - pow(clamp(lightness, 0.0, 1.0), parameters.oklabHighlightChromaPower);
 }
 
 fn roundingPower(lightness: f32) -> f32 {
     let endpointDistance: f32 = lightness * (1.0 - lightness);
-    return 32.0 - 256.0 * endpointDistance * endpointDistance;
+    let midtoneWeight: f32 = clamp(16.0 * endpointDistance * endpointDistance, 0.0, 1.0);
+    return mix(parameters.oklabEndpointCompressionPower, parameters.oklabMidtoneCompressionPower, midtoneWeight);
 }
 
 fn mapLinearRgb(color: vec3f) -> vec3f {
@@ -244,7 +245,7 @@ fn mapLinearRgb(color: vec3f) -> vec3f {
     let outputLightness: f32 = mapLightness(oklab.x);
     let inputChroma: f32 = length(oklab.yz);
     if (inputChroma <= 1.0e-8) {
-        return OKLAB_LOG_SHOULDER_RGB_HEADROOM * oklabToRgb(vec3f(outputLightness, 0.0, 0.0));
+        return OKLAB_LOG_SIGMOID_RGB_HEADROOM * oklabToRgb(vec3f(outputLightness, 0.0, 0.0));
     }
     let hue: vec2f = oklab.yz / inputChroma;
     let direction: vec3f = rootDirection(hue);
@@ -253,7 +254,7 @@ fn mapLinearRgb(color: vec3f) -> vec3f {
     let desiredSaturation: f32 = inputSaturation * chromaRetention(outputLightness);
     let cap: f32 = saturationCap(outputLightness, maximumSaturation, direction);
     let outputSaturation: f32 = softMin(desiredSaturation, cap, roundingPower(outputLightness));
-    return OKLAB_LOG_SHOULDER_RGB_HEADROOM * oklabToRgb(vec3f(
+    return OKLAB_LOG_SIGMOID_RGB_HEADROOM * oklabToRgb(vec3f(
         outputLightness, outputLightness * outputSaturation * hue));
 }
 
