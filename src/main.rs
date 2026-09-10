@@ -15,7 +15,8 @@ use eframe::egui::{self, Color32, RichText, Vec2};
 use crate::distribution::{ColorSpace, DEFAULT_PITCH, DEFAULT_YAW, DistributionRenderer};
 use crate::file_browser::{FolderBrowser, Thumbnail, ThumbnailLoader};
 use crate::gpu::{
-    DrtGpu, DrtKind, LogSigmoidParameters, ReinhardParameters, RgbLogShoulderParameters,
+    DrtGpu, DrtKind, LogShoulderParameters, LogSigmoidParameters, ReinhardParameters,
+    RgbLogSigmoidParameters,
 };
 use crate::presenter::{DisplayOutput, StartupOptions};
 use crate::tone_curve::ToneCurveRenderer;
@@ -55,12 +56,13 @@ struct DrtApp {
     gpu: DrtGpu,
     exposure_ev: f32,
     agx_s2o3_parameters: LogSigmoidParameters,
-    rgb_log_sigmoid_parameters: LogSigmoidParameters,
+    rgb_log_sigmoid_parameters: RgbLogSigmoidParameters,
     rgb_log_sigmoid_black_hue_retention: f32,
     rgb_log_sigmoid_white_hue_retention: f32,
     oklab_reinhard_parameters: ReinhardParameters,
+    oklab_log_shoulder_parameters: LogShoulderParameters,
     rgb_reinhard_parameters: ReinhardParameters,
-    rgb_log_shoulder_parameters: RgbLogShoulderParameters,
+    rgb_log_shoulder_parameters: LogShoulderParameters,
     show_anomalies: bool,
     image_name: String,
     status: String,
@@ -128,12 +130,13 @@ impl DrtApp {
             gpu,
             exposure_ev: 0.0,
             agx_s2o3_parameters: LogSigmoidParameters::s2o3_reference(),
-            rgb_log_sigmoid_parameters: LogSigmoidParameters::rgb_default(),
+            rgb_log_sigmoid_parameters: RgbLogSigmoidParameters::default(),
             rgb_log_sigmoid_black_hue_retention: 1.0,
             rgb_log_sigmoid_white_hue_retention: 0.5,
             oklab_reinhard_parameters: ReinhardParameters::oklab_default(),
+            oklab_log_shoulder_parameters: LogShoulderParameters::oklab_default(),
             rgb_reinhard_parameters: ReinhardParameters::default(),
-            rgb_log_shoulder_parameters: RgbLogShoulderParameters::default(),
+            rgb_log_shoulder_parameters: LogShoulderParameters::default(),
             show_anomalies: initial_show_anomalies,
             image_name,
             status: folder_browser.as_ref().map_or_else(
@@ -386,10 +389,10 @@ impl DrtApp {
                 if selected_drt != self.gpu.active_drt() {
                     match selected_drt {
                         DrtKind::AgxS2O3 => {
-                            self.gpu.set_log_sigmoid_parameters(self.agx_s2o3_parameters)
+                            self.gpu.set_agx_s2o3_parameters(self.agx_s2o3_parameters)
                         }
                         DrtKind::RgbLogSigmoid => {
-                            self.gpu.set_log_sigmoid_parameters(self.rgb_log_sigmoid_parameters)
+                            self.gpu.set_rgb_log_sigmoid_parameters(self.rgb_log_sigmoid_parameters)
                         }
                         DrtKind::RgbReinhard => self
                             .gpu
@@ -397,6 +400,9 @@ impl DrtApp {
                         DrtKind::RgbLogShoulder => self
                             .gpu
                             .set_rgb_log_shoulder_parameters(self.rgb_log_shoulder_parameters),
+                        DrtKind::OklabLogShoulder => self
+                            .gpu
+                            .set_oklab_log_shoulder_parameters(self.oklab_log_shoulder_parameters),
                         DrtKind::None | DrtKind::OklabReinhard => {}
                     }
                     self.gpu.set_drt(selected_drt);
@@ -455,7 +461,7 @@ impl DrtApp {
                         DrtKind::RgbLogSigmoid => "RGB Log Sigmoid",
                         DrtKind::RgbReinhard => "RGB Reinhard",
                         DrtKind::RgbLogShoulder => "RGB Log Shoulder",
-                        DrtKind::OklabReinhard | DrtKind::AgxS2O3 => "HDR target",
+                        DrtKind::OklabReinhard | DrtKind::OklabLogShoulder | DrtKind::AgxS2O3 => "HDR target",
                     };
                     ui.label(
                         RichText::new(format!(
@@ -500,27 +506,32 @@ impl DrtApp {
                 if exposure_changed {
                     self.gpu.set_exposure(self.exposure_ev);
                 }
-                if matches!(active_drt, DrtKind::RgbReinhard | DrtKind::RgbLogShoulder | DrtKind::OklabReinhard) {
-                    let using_log_shoulder = active_drt == DrtKind::RgbLogShoulder;
-                    let mut rgb_log_shoulder = self.rgb_log_shoulder_parameters;
-                    let mut reinhard_parameters = if active_drt == DrtKind::OklabReinhard {
+                if matches!(active_drt, DrtKind::RgbReinhard | DrtKind::RgbLogShoulder | DrtKind::OklabReinhard | DrtKind::OklabLogShoulder) {
+                    let using_oklab = active_drt.is_oklab();
+                    let using_log_shoulder = active_drt.uses_log_shoulder();
+                    let mut log_shoulder = if using_oklab {
+                        self.oklab_log_shoulder_parameters
+                    } else {
+                        self.rgb_log_shoulder_parameters
+                    };
+                    let mut linear_parameters = if using_log_shoulder {
+                        log_shoulder.base
+                    } else if using_oklab {
                         self.oklab_reinhard_parameters
-                    } else if using_log_shoulder {
-                        rgb_log_shoulder.base
                     } else {
                         self.rgb_reinhard_parameters
                     };
                     ui.separator();
-                    let mut reinhard_changed = false;
-                    if active_drt != DrtKind::OklabReinhard {
+                    let mut linear_changed = false;
+                    if !using_oklab {
                         ui.label(RichText::new(active_drt.label()).strong());
                         if using_log_shoulder {
                             ui.label(RichText::new("Linear shadows · Log shoulder · independent settings").small().weak());
                         }
-                        reinhard_changed |= ui
+                        linear_changed |= ui
                             .add(
                                 egui::Slider::new(
-                                    &mut reinhard_parameters.gamut_expansion,
+                                    &mut linear_parameters.gamut_expansion,
                                     0.0..=0.8,
                                 )
                                 .step_by(0.01)
@@ -532,17 +543,17 @@ impl DrtApp {
                             )
                             .changed();
                     } else {
-                        ui.label(RichText::new("Oklab Reinhard curve").strong());
+                        ui.label(RichText::new(format!("{} curve", active_drt.label())).strong());
                         ui.label(
-                            RichText::new("Oklab Reinhard has independent curve settings and uses the SDR range.")
+                            RichText::new("Independent curve settings in Oklab L^3; output uses the SDR range.")
                                 .small()
                                 .weak(),
                         );
                     }
-                    reinhard_changed |= ui
+                    linear_changed |= ui
                         .add(
                             egui::Slider::new(
-                                &mut reinhard_parameters.input_scale,
+                                &mut linear_parameters.input_scale,
                                 0.1..=8.0,
                             )
                             .step_by(0.01)
@@ -552,12 +563,12 @@ impl DrtApp {
                             "Defines the linear segment's slope using 18% gray; gray is compressed when Compression start is below 0.18",
                         )
                         .changed();
-                    reinhard_parameters.constrain();
-                    let maximum_start = reinhard_parameters.maximum_compression_start();
-                    reinhard_changed |= ui
+                    linear_parameters.constrain();
+                    let maximum_start = linear_parameters.maximum_compression_start();
+                    linear_changed |= ui
                         .add(
                             egui::Slider::new(
-                                &mut reinhard_parameters.compression_start,
+                                &mut linear_parameters.compression_start,
                                 0.0..=maximum_start,
                             )
                             .step_by(0.001)
@@ -565,19 +576,23 @@ impl DrtApp {
                             .text("Compression start"),
                         )
                         .on_hover_text(
-                            "Scene-linear input where the straight segment joins the shoulder. The maximum keeps the join below SDR white",
+                            if using_oklab {
+                                "Oklab L^3 where the straight segment joins the shoulder; equals scene-linear input on the neutral axis"
+                            } else {
+                                "Scene-linear input where the straight segment joins the shoulder. The maximum keeps the join below SDR white"
+                            },
                         )
                         .changed();
                     let minimum_reach = if using_log_shoulder {
-                        rgb_log_shoulder.base = reinhard_parameters;
-                        rgb_log_shoulder.minimum_highlight_reach_ev()
+                        log_shoulder.base = linear_parameters;
+                        log_shoulder.minimum_highlight_reach_ev()
                     } else {
-                        reinhard_parameters.minimum_highlight_reach_ev()
+                        linear_parameters.minimum_highlight_reach_ev()
                     };
-                    reinhard_changed |= ui
+                    linear_changed |= ui
                         .add(
                             egui::Slider::new(
-                                &mut reinhard_parameters.highlight_reach_ev,
+                                &mut linear_parameters.highlight_reach_ev,
                                 minimum_reach..=20.0,
                             )
                             .step_by(0.25)
@@ -589,18 +604,18 @@ impl DrtApp {
                         )
                         .changed();
                     if using_log_shoulder {
-                        reinhard_changed |= ui
-                            .add(egui::Slider::new(&mut rgb_log_shoulder.shoulder_power, 1.0..=8.0)
+                        linear_changed |= ui
+                            .add(egui::Slider::new(&mut log_shoulder.shoulder_power, 1.0..=8.0)
                                 .step_by(0.05)
                                 .text("Shoulder power"))
                             .on_hover_text("Log shoulder shape: higher values delay compression and approach white more sharply; the linear segment and its join stay fixed")
                             .changed();
                     }
-                    if active_drt != DrtKind::OklabReinhard {
-                        reinhard_changed |= ui
+                    if !using_oklab {
+                        linear_changed |= ui
                             .add(
                                 egui::Slider::new(
-                                    &mut reinhard_parameters.hue_retention,
+                                    &mut linear_parameters.hue_retention,
                                     0.0..=1.0,
                                 )
                                 .step_by(0.01)
@@ -612,25 +627,25 @@ impl DrtApp {
                             )
                             .changed();
                     }
-                    reinhard_parameters.constrain();
+                    linear_parameters.constrain();
                     if using_log_shoulder {
-                        rgb_log_shoulder.base = reinhard_parameters;
-                        rgb_log_shoulder.constrain();
-                        reinhard_parameters = rgb_log_shoulder.base;
+                        log_shoulder.base = linear_parameters;
+                        log_shoulder.constrain();
+                        linear_parameters = log_shoulder.base;
                     }
-                    let curve_headroom = if active_drt != DrtKind::OklabReinhard {
+                    let curve_headroom = if !using_oklab {
                         self.gpu.output_headroom()
                     } else {
                         1.0
                     };
                     let (mapped_gray, effective_reach, curve_details) = if using_log_shoulder {
-                        let curve = rgb_log_shoulder.curve_for_headroom(curve_headroom);
+                        let curve = log_shoulder.curve_for_headroom(curve_headroom);
                         (curve.map_linear(0.18), curve.highlight_reach_ev, format!(
                             "Curve asymptote {:.3}× · display clamp {:.3}× · linear slope {:.3}",
                             curve.curve_peak, curve_headroom, curve.linear_slope,
                         ))
                     } else {
-                        let curve = reinhard_parameters.curve_for_headroom(curve_headroom);
+                        let curve = linear_parameters.curve_for_headroom(curve_headroom);
                         (curve.map_linear(0.18), curve.highlight_reach_ev, format!(
                             "Curve asymptote {:.3}× · display clamp {:.3}× · linear slope {:.3} · shoulder rate {:.3}",
                             curve.curve_peak, curve_headroom, curve.linear_slope, curve.shoulder_scale,
@@ -640,39 +655,33 @@ impl DrtApp {
                         RichText::new(format!(
                             "18% gray → {:.3} · SDR reach {:+.2} EV · effective reach {:+.2} EV",
                             mapped_gray,
-                            reinhard_parameters.highlight_reach_ev,
+                            linear_parameters.highlight_reach_ev,
                             effective_reach,
                         ))
                         .small()
                         .weak(),
                     );
                     ui.label(RichText::new(curve_details).small().weak());
-                    if reinhard_changed {
-                        if active_drt == DrtKind::OklabReinhard {
-                            self.oklab_reinhard_parameters = reinhard_parameters;
-                            self.gpu.set_oklab_reinhard_parameters(reinhard_parameters);
+                    if linear_changed {
+                        if active_drt == DrtKind::OklabLogShoulder {
+                            self.oklab_log_shoulder_parameters = log_shoulder;
+                            self.gpu.set_oklab_log_shoulder_parameters(log_shoulder);
+                        } else if active_drt == DrtKind::OklabReinhard {
+                            self.oklab_reinhard_parameters = linear_parameters;
+                            self.gpu.set_oklab_reinhard_parameters(linear_parameters);
                         } else if using_log_shoulder {
-                            self.rgb_log_shoulder_parameters = rgb_log_shoulder;
-                            self.gpu.set_rgb_log_shoulder_parameters(rgb_log_shoulder);
+                            self.rgb_log_shoulder_parameters = log_shoulder;
+                            self.gpu.set_rgb_log_shoulder_parameters(log_shoulder);
                         } else {
-                            self.rgb_reinhard_parameters = reinhard_parameters;
-                            self.gpu.set_rgb_reinhard_parameters(reinhard_parameters);
+                            self.rgb_reinhard_parameters = linear_parameters;
+                            self.gpu.set_rgb_reinhard_parameters(linear_parameters);
                         }
                     }
                 }
-                if active_drt.uses_log_sigmoid() {
-                    let mut log_sigmoid_parameters = match active_drt {
-                        DrtKind::AgxS2O3 => self.agx_s2o3_parameters,
-                        DrtKind::RgbLogSigmoid => self.rgb_log_sigmoid_parameters,
-                        DrtKind::None | DrtKind::OklabReinhard | DrtKind::RgbReinhard | DrtKind::RgbLogShoulder => unreachable!(),
-                    };
+                if active_drt == DrtKind::AgxS2O3 {
+                    let mut log_sigmoid_parameters = self.agx_s2o3_parameters;
                     ui.separator();
-                    let heading = match active_drt {
-                        DrtKind::AgxS2O3 => "AgX-S2O3 reference scale",
-                        DrtKind::RgbLogSigmoid => "RGB Log Sigmoid tone scale",
-                        DrtKind::None | DrtKind::OklabReinhard | DrtKind::RgbReinhard | DrtKind::RgbLogShoulder => unreachable!(),
-                    };
-                    ui.label(RichText::new(heading).strong());
+                    ui.label(RichText::new("AgX-S2O3 reference scale").strong());
 
                     let mut log_sigmoid_changed = ui
                         .add(
@@ -697,7 +706,7 @@ impl DrtApp {
                             .text("Highlight reach"),
                         )
                         .on_hover_text(
-                            "Scene stops above 18% gray mapped into SDR white at 1×; HDR headroom extends this reach automatically",
+                            "Scene stops above 18% gray mapped to SDR white",
                         )
                         .changed();
                     log_sigmoid_changed |= ui
@@ -757,77 +766,113 @@ impl DrtApp {
                         .changed();
 
                     log_sigmoid_parameters.constrain();
-                    let range_description = if active_drt == DrtKind::RgbLogSigmoid
-                        && self.gpu.output_peak() > 1.0
-                    {
-                        format!(
-                            "SDR {:+.2}/{:+.2} EV · HDR highlight {:+.2} EV · pivot {:.3}",
-                            log_sigmoid_parameters.shadow_ev,
-                            log_sigmoid_parameters.highlight_ev,
-                            log_sigmoid_parameters.output_highlight_ev(self.gpu.output_peak()),
-                            log_sigmoid_parameters.input_pivot(),
-                        )
-                    } else {
-                        format!(
-                            "{:.2} stops · input pivot {:.3} · slope min {:.3}",
-                            log_sigmoid_parameters.highlight_ev - log_sigmoid_parameters.shadow_ev,
-                            log_sigmoid_parameters.input_pivot(),
-                            log_sigmoid_parameters.minimum_pivot_slope(),
-                        )
-                    };
-                    ui.label(RichText::new(range_description).small().weak());
-                    match active_drt {
-                        DrtKind::AgxS2O3 => self.agx_s2o3_parameters = log_sigmoid_parameters,
-                        DrtKind::RgbLogSigmoid => self.rgb_log_sigmoid_parameters = log_sigmoid_parameters,
-                        DrtKind::None | DrtKind::OklabReinhard | DrtKind::RgbReinhard | DrtKind::RgbLogShoulder => unreachable!(),
-                    }
+                    ui.label(RichText::new(format!(
+                        "{:.2} stops · input pivot {:.3} · slope min {:.3}",
+                        log_sigmoid_parameters.highlight_ev - log_sigmoid_parameters.shadow_ev,
+                        log_sigmoid_parameters.input_pivot(),
+                        log_sigmoid_parameters.minimum_pivot_slope(),
+                    )).small().weak());
+                    self.agx_s2o3_parameters = log_sigmoid_parameters;
                     if log_sigmoid_changed {
-                        self.gpu.set_log_sigmoid_parameters(log_sigmoid_parameters);
+                        self.gpu.set_agx_s2o3_parameters(log_sigmoid_parameters);
                     }
-                    if active_drt == DrtKind::RgbLogSigmoid {
-                        ui.separator();
-                        ui.label(RichText::new("HSV hue repair").strong());
-                        let mut retention_changed = ui
-                            .add(
-                                egui::Slider::new(
-                                    &mut self.rgb_log_sigmoid_black_hue_retention,
-                                    0.0..=1.0,
-                                )
-                                    .step_by(0.01)
-                                    .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
-                                    .text("Black retention"),
+                }
+                if active_drt == DrtKind::RgbLogSigmoid {
+                    let mut source = self.rgb_log_sigmoid_parameters;
+                    ui.separator();
+                    ui.label(RichText::new("RGB Log Sigmoid tone scale").strong());
+                    let mut changed = ui
+                        .add(
+                            egui::Slider::new(&mut source.linear_slope, 0.1..=4.0)
+                                .step_by(0.01)
+                                .text("Linear slope"),
+                        )
+                        .on_hover_text("Display-linear gain through scene-linear 18% gray; 1 preserves neutral shadows")
+                        .changed();
+                    source.constrain();
+                    let minimum_reach = source.minimum_highlight_ev();
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut source.highlight_ev, minimum_reach..=20.0)
+                                .step_by(0.25)
+                                .suffix(" EV")
+                                .text("Highlight reach"),
+                        )
+                        .on_hover_text("Scene stops above 18% gray mapped to SDR white; HDR extends the shoulder automatically")
+                        .changed();
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut source.shoulder_power, 1.0..=8.0)
+                                .step_by(0.05)
+                                .text("Shoulder power"),
+                        )
+                        .on_hover_text("Higher values delay highlight compression and approach white more sharply")
+                        .changed();
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut source.gamut_compression, 0.0..=0.8)
+                                .step_by(0.01)
+                                .text("Gamut compression"),
+                        )
+                        .on_hover_text("Inset toward the neutral axis before the per-channel curve")
+                        .changed();
+                    source.constrain();
+                    let curve = source.tone_scale();
+                    ui.label(RichText::new(format!(
+                        "Linear through 18% gray · output gray {:.3}", curve.output_pivot
+                    )).small().weak());
+                    if self.gpu.output_peak() > 1.0 {
+                        ui.label(RichText::new(format!(
+                            "HDR highlight reach {:+.2} EV", curve.output_highlight_ev(self.gpu.output_peak())
+                        )).small().weak());
+                    }
+                    self.rgb_log_sigmoid_parameters = source;
+                    if changed {
+                        self.gpu.set_rgb_log_sigmoid_parameters(source);
+                    }
+                    ui.label(RichText::new("Neutral shadows stay linear; gamut and hue controls can change colored shadows.").small().weak());
+                    ui.separator();
+                    ui.label(RichText::new("HSV hue repair").strong());
+                    let mut retention_changed = ui
+                        .add(
+                            egui::Slider::new(
+                                &mut self.rgb_log_sigmoid_black_hue_retention,
+                                0.0..=1.0,
                             )
-                            .on_hover_text(
-                                "Original-hue retention applied where the RGB Log Sigmoid output value is zero",
-                            )
-                            .changed();
-                        retention_changed |= ui
-                            .add(
-                                egui::Slider::new(
-                                    &mut self.rgb_log_sigmoid_white_hue_retention,
-                                    0.0..=1.0,
-                                )
                                 .step_by(0.01)
                                 .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
-                                .text("White retention"),
+                                .text("Black retention"),
+                        )
+                        .on_hover_text(
+                            "Original-hue retention applied where the RGB Log Sigmoid output value is zero",
+                        )
+                        .changed();
+                    retention_changed |= ui
+                        .add(
+                            egui::Slider::new(
+                                &mut self.rgb_log_sigmoid_white_hue_retention,
+                                0.0..=1.0,
                             )
-                            .on_hover_text(
-                                "Original-hue retention applied where the RGB Log Sigmoid output value reaches the display peak",
-                            )
-                            .changed();
-                        ui.label(
-                            RichText::new(
-                                "Retention is interpolated by the HSV value normalized to the display peak",
-                            )
-                            .small()
-                            .weak(),
+                            .step_by(0.01)
+                            .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
+                            .text("White retention"),
+                        )
+                        .on_hover_text(
+                            "Original-hue retention applied where the RGB Log Sigmoid output value reaches the display peak",
+                        )
+                        .changed();
+                    ui.label(
+                        RichText::new(
+                            "Retention is interpolated by the HSV value normalized to the display peak",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                    if retention_changed {
+                        self.gpu.set_rgb_log_sigmoid_hue_retention(
+                            self.rgb_log_sigmoid_black_hue_retention,
+                            self.rgb_log_sigmoid_white_hue_retention,
                         );
-                        if retention_changed {
-                            self.gpu.set_rgb_log_sigmoid_hue_retention(
-                                self.rgb_log_sigmoid_black_hue_retention,
-                                self.rgb_log_sigmoid_white_hue_retention,
-                            );
-                        }
                     }
                 }
                 if ui
@@ -858,28 +903,25 @@ impl DrtApp {
                 if ui.button("Reset parameters").clicked() {
                     self.exposure_ev = 0.0;
                     self.agx_s2o3_parameters = LogSigmoidParameters::s2o3_reference();
-                    self.rgb_log_sigmoid_parameters = LogSigmoidParameters::rgb_default();
+                    self.rgb_log_sigmoid_parameters = RgbLogSigmoidParameters::default();
                     self.rgb_log_sigmoid_black_hue_retention = 1.0;
                     self.rgb_log_sigmoid_white_hue_retention = 0.5;
                     self.oklab_reinhard_parameters = ReinhardParameters::oklab_default();
+                    self.oklab_log_shoulder_parameters = LogShoulderParameters::oklab_default();
                     self.rgb_reinhard_parameters = ReinhardParameters::default();
-                    self.rgb_log_shoulder_parameters = RgbLogShoulderParameters::default();
+                    self.rgb_log_shoulder_parameters = LogShoulderParameters::default();
                     self.show_anomalies = false;
                     self.gpu.set_exposure(self.exposure_ev);
-                    let active_log_sigmoid_parameters = match self.gpu.active_drt() {
-                        DrtKind::AgxS2O3 => Some(self.agx_s2o3_parameters),
-                        DrtKind::RgbLogSigmoid => Some(self.rgb_log_sigmoid_parameters),
-                        DrtKind::None | DrtKind::OklabReinhard | DrtKind::RgbReinhard | DrtKind::RgbLogShoulder => None,
-                    };
-                    if let Some(parameters) = active_log_sigmoid_parameters {
-                        self.gpu.set_log_sigmoid_parameters(parameters);
-                    }
+                    self.gpu.set_agx_s2o3_parameters(self.agx_s2o3_parameters);
+                    self.gpu.set_rgb_log_sigmoid_parameters(self.rgb_log_sigmoid_parameters);
                     self.gpu.set_rgb_log_sigmoid_hue_retention(
                         self.rgb_log_sigmoid_black_hue_retention,
                         self.rgb_log_sigmoid_white_hue_retention,
                     );
                     self.gpu
                         .set_oklab_reinhard_parameters(self.oklab_reinhard_parameters);
+                    self.gpu
+                        .set_oklab_log_shoulder_parameters(self.oklab_log_shoulder_parameters);
                     self.gpu
                         .set_rgb_reinhard_parameters(self.rgb_reinhard_parameters);
                     self.gpu

@@ -1,6 +1,7 @@
-// RGB Log Sigmoid: virtual RGB coordinates, a per-channel log2 sigmoid with
-// separate toe and shoulder, and optional HSV hue repair in the display signal.
-// Derived from the AgX tone-scale structure, with custom defaults and HDR support.
+// RGB Log Sigmoid: a per-channel log2 curve in virtual RGB coordinates.
+// Below 18% gray, the curve encodes an exact linear-light segment analytically;
+// above it, a tangent-matched AgX-form sigmoid shoulder compresses highlights.
+// Inset/outset and HSV hue repair can still change colored shadows.
 // Input: scene-linear ACES2065-1 (AP0).
 // Output: display-encoded extended sRGB (1.0 is SDR reference white).
 
@@ -88,20 +89,38 @@ fn fromVirtualRgb(color: vec3f) -> vec3f {
 }
 
 fn logSigmoidComponent(value: f32) -> f32 {
-    let toe: bool = value <= parameters.logSigmoidInputPivot;
-    let power: f32 = select(parameters.sigmoidShoulderPower, parameters.logSigmoidToePower, toe);
-    let coefficient: f32 = select(parameters.sigmoidShoulderCoefficient, parameters.logSigmoidToeCoefficient, toe);
     let distance: f32 = value - parameters.logSigmoidInputPivot;
+    if (distance <= 0.0) {
+        // F(u) = OETF(k * 0.18 * 2^((u - pivot) * dynamicRange)).
+        // Decoding F recovers k*x; the host derives the shoulder's tangent
+        // from this same expression, so value and first derivative agree.
+        let linearPivot: f32 = decodeSrgb(vec3f(parameters.logSigmoidOutputPivot)).x;
+        let linearValue: f32 = linearPivot
+            * exp2(distance / parameters.logSigmoidInverseDynamicRange);
+        return encodeSrgb(vec3f(linearValue)).x;
+    }
+    let power: f32 = parameters.sigmoidShoulderPower;
+    let coefficient: f32 = parameters.sigmoidShoulderCoefficient;
     return parameters.logSigmoidOutputPivot
         + parameters.logSigmoidPivotSlope * distance
-            * pow(1.0 + coefficient * pow(abs(distance), power), -1.0 / power);
+            * pow(1.0 + coefficient * pow(distance, power), -1.0 / power);
+}
+
+fn linearToLogSigmoidComponent(value: f32) -> f32 {
+    if (value <= 0.0) { return 0.0; }
+    // No lower log clamp: the coordinate origin is not a black floor.
+    let normalizedLog: f32 = min(
+        (log2(value) - parameters.logSigmoidMinimumLog2)
+            * parameters.logSigmoidInverseDynamicRange,
+        parameters.logSigmoidMaximumLogCoordinate);
+    return logSigmoidComponent(normalizedLog);
 }
 
 fn logSigmoidCurve(value: vec3f) -> vec3f {
     return vec3f(
-        logSigmoidComponent(value.x),
-        logSigmoidComponent(value.y),
-        logSigmoidComponent(value.z));
+        linearToLogSigmoidComponent(value.x),
+        linearToLogSigmoidComponent(value.y),
+        linearToLogSigmoidComponent(value.z));
 }
 
 fn rgbLogSigmoid(linearRec709: vec3f) -> vec3f {
@@ -110,12 +129,7 @@ fn rgbLogSigmoid(linearRec709: vec3f) -> vec3f {
     // 5.2 default is an accepted artistic compromise pending a color-trajectory
     // model that is independent from the tone curve.
     let inset: vec3f = toVirtualRgb(linearRec709);
-    let normalizedLog: vec3f = clamp(
-        (log2(inset) - vec3f(parameters.logSigmoidMinimumLog2))
-            * parameters.logSigmoidInverseDynamicRange,
-        vec3f(0.0),
-        vec3f(parameters.logSigmoidMaximumLogCoordinate));
-    return fromVirtualRgb(logSigmoidCurve(normalizedLog));
+    return fromVirtualRgb(logSigmoidCurve(inset));
 }
 
 fn adjustHsv(originalLinear: vec3f, mappedDisplay: vec3f) -> vec3f {
@@ -137,6 +151,22 @@ fn adjustHsv(originalLinear: vec3f, mappedDisplay: vec3f) -> vec3f {
 
     mappedHsv.y = clamp(mappedHsv.y, 0.0, 1.0);
     return hsvToRgb(mappedHsv);
+}
+
+fn encodeSrgb(linearRgb: vec3f) -> vec3f {
+    let cutoff: vec3<bool> = linearRgb < vec3f(0.0031308);
+    let higher: vec3f = 1.055 * pow(max(linearRgb, vec3f(0.0)), vec3f(1.0 / 2.4)) - vec3f(0.055);
+    let lower: vec3f = linearRgb * 12.92;
+    return vec3f(
+        select(higher.x, lower.x, cutoff.x),
+        select(higher.y, lower.y, cutoff.y),
+        select(higher.z, lower.z, cutoff.z));
+}
+
+fn decodeSrgb(encoded: vec3f) -> vec3f {
+    let lower: vec3f = encoded / 12.92;
+    let higher: vec3f = pow(max((encoded + vec3f(0.055)) / 1.055, vec3f(0.0)), vec3f(2.4));
+    return select(higher, lower, encoded <= vec3f(0.04045));
 }
 
 // Classify IEEE-754 bits; WGSL has no isnan/isinf built-ins.

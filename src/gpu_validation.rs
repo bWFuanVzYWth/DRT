@@ -163,6 +163,7 @@ fn drt_gpu_outputs() {
     let shaders: [&str; DrtKind::ALL.len()] = [
         BUILT_NONE_SHADER,
         BUILT_OKLAB_REINHARD_SHADER,
+        BUILT_OKLAB_LOG_SHOULDER_SHADER,
         BUILT_AGX_S2O3_SHADER,
         BUILT_RGB_LOG_SIGMOID_SHADER,
         BUILT_RGB_REINHARD_SHADER,
@@ -189,7 +190,7 @@ fn drt_gpu_outputs() {
             parameters.set_reinhard_for_drt(drt, oklab, reinhard, headroom);
             parameters.set_log_sigmoid_for_headroom(
                 if drt == DrtKind::RgbLogSigmoid {
-                    LogSigmoidParameters::rgb_default()
+                    RgbLogSigmoidParameters::default().tone_scale()
                 } else {
                     LogSigmoidParameters::default()
                 },
@@ -200,15 +201,20 @@ fn drt_gpu_outputs() {
                 },
             );
             let log_shoulder = if variant >= 3 {
-                RgbLogShoulderParameters {
-                    base: reinhard,
+                LogShoulderParameters {
+                    base: if drt.is_oklab() { oklab } else { reinhard },
                     shoulder_power: 1.5,
                 }
+            } else if drt.is_oklab() {
+                LogShoulderParameters::oklab_default()
             } else {
-                RgbLogShoulderParameters::default()
+                LogShoulderParameters::default()
             };
-            if drt == DrtKind::RgbLogShoulder {
-                parameters.set_rgb_log_shoulder_for_headroom(log_shoulder, headroom);
+            if drt.uses_log_shoulder() {
+                parameters.set_log_shoulder_for_headroom(
+                    log_shoulder,
+                    direct_output_headroom(drt, headroom),
+                );
             }
             let pixels = gpu.render(&pipeline, parameters, &image.rgba);
             assert!(pixels.iter().all(|v| v.is_finite() && *v >= 0.0));
@@ -233,10 +239,11 @@ fn drt_gpu_outputs() {
                 assert!((pixel[0] - pixel[1]).abs() < 0.003 * peak);
                 assert!((pixel[1] - pixel[2]).abs() < 0.003 * peak);
             }
-            if drt == DrtKind::OklabReinhard {
-                // Oklab always applies the independent piecewise curve in L^3.
+            if drt.is_oklab() {
+                // Both Oklab transforms apply their independent curve in L^3.
                 // Allow fp16 storage and the AP0/Rec.709 neutral-axis rounding.
                 let curve = oklab.curve_for_headroom(1.0);
+                let log_curve = log_shoulder.curve_for_headroom(1.0);
                 for (pixel, input) in ramp
                     .as_chunks::<4>()
                     .0
@@ -245,11 +252,16 @@ fn drt_gpu_outputs() {
                 {
                     let value =
                         half::f16::from_f32(input[0]).to_f32() * parameters.exposure_multiplier;
-                    let expected =
-                        extended_srgb_oetf((curve.map_linear(value) * 0.99999).clamp(0.0, 1.0));
+                    let mapped = if drt.uses_log_shoulder() {
+                        log_curve.map_linear(value)
+                    } else {
+                        curve.map_linear(value)
+                    };
+                    let expected = extended_srgb_oetf((mapped * 0.99999).clamp(0.0, 1.0));
                     assert!(
                         (pixel[0] - expected).abs() < 0.003,
-                        "Oklab Reinhard curve: expected {expected}, got {}",
+                        "{} curve: expected {expected}, got {}",
+                        drt.label(),
                         pixel[0]
                     );
                 }
@@ -307,6 +319,7 @@ fn drt_gpu_diagnostics() {
     let shaders: [&str; DrtKind::ALL.len()] = [
         BUILT_NONE_SHADER,
         BUILT_OKLAB_REINHARD_SHADER,
+        BUILT_OKLAB_LOG_SHOULDER_SHADER,
         BUILT_AGX_S2O3_SHADER,
         BUILT_RGB_LOG_SIGMOID_SHADER,
         BUILT_RGB_REINHARD_SHADER,
@@ -326,9 +339,13 @@ fn drt_gpu_diagnostics() {
                 [f32::INFINITY, f32::NEG_INFINITY, 0.0],
             ] {
                 let mut parameters = Parameters::new(1, 1);
-                if drt == DrtKind::RgbLogShoulder {
-                    parameters.set_rgb_log_shoulder_for_headroom(
-                        RgbLogShoulderParameters::default(),
+                if drt.uses_log_shoulder() {
+                    parameters.set_log_shoulder_for_headroom(
+                        if drt.is_oklab() {
+                            LogShoulderParameters::oklab_default()
+                        } else {
+                            LogShoulderParameters::default()
+                        },
                         1.0,
                     );
                 }
@@ -355,6 +372,104 @@ fn drt_gpu_diagnostics() {
         if drt == DrtKind::None {
             assert_color(&pixels[8 * 4..9 * 4], [0.0, 0.25, 1.0]);
             assert_color(&pixels[9 * 4..10 * 4], [1.0, 0.05, 0.0]);
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a GPU; run with --ignored --nocapture"]
+fn rgb_log_sigmoid_analytic_shadows_and_original_shoulder() {
+    let gpu = TestGpu::new();
+    let pipeline = create_pipeline(
+        &gpu.device,
+        &gpu.layout,
+        BUILT_RGB_LOG_SIGMOID_SHADER,
+        "analytic log curve",
+    )
+    .unwrap();
+    // Probe the production scalar curve separately from the color transforms.
+    let scalar_shader = BUILT_RGB_LOG_SIGMOID_SHADER.replace(
+        "let mapped: vec3f = adjustHsv(originalLinear, rgbLogSigmoid(originalLinear));",
+        "let mapped: vec3f = logSigmoidCurve(ap0);",
+    );
+    assert_ne!(scalar_shader, BUILT_RGB_LOG_SIGMOID_SHADER);
+    let scalar_pipeline = create_pipeline(
+        &gpu.device,
+        &gpu.layout,
+        &scalar_shader,
+        "scalar log curve probe",
+    )
+    .unwrap();
+    let mut ramp = vec![0.0];
+    ramp.extend((0..=256).map(|i| 0.18 * 2.0_f32.powf(-20.0 + i as f32 * 20.0 / 256.0)));
+    // Include both sides of the join and a dense highlight ramp.
+    ramp.extend([0.1798, 0.18, 0.1802]);
+    ramp.extend((1..=256).map(|i| 0.18 * 2.0_f32.powf(i as f32 * 18.0 / 256.0)));
+    ramp.sort_by(f32::total_cmp);
+    let input: Vec<_> = ramp.iter().flat_map(|&x| [x, x, x, 1.0]).collect();
+    for linear_slope in [0.1, 1.0, 4.0] {
+        for headroom in [1.0, 4.0, 64.0] {
+            let source = RgbLogSigmoidParameters {
+                linear_slope,
+                ..RgbLogSigmoidParameters::default()
+            };
+            let mut parameters = Parameters::new(ramp.len() as u32, 1);
+            parameters.set_log_sigmoid_for_headroom(source.tone_scale(), headroom);
+            let scalar = gpu.render(&scalar_pipeline, parameters, &input);
+            let output = gpu.render(&pipeline, parameters, &input);
+            let mut original = parameters;
+            original.set_log_sigmoid_for_headroom(
+                LogSigmoidParameters::original_rgb_reference(),
+                headroom,
+            );
+            let mut previous = 0.0;
+            for ((&x, pixel), raw) in ramp
+                .iter()
+                .zip(output.as_chunks::<4>().0)
+                .zip(scalar.as_chunks::<4>().0)
+            {
+                let x = half::f16::from_f32(x).to_f32();
+                assert!(pixel.iter().all(|v| v.is_finite()));
+                assert!(
+                    pixel[0] >= previous,
+                    "non-monotonic at {x}: {previous} -> {}",
+                    pixel[0]
+                );
+                previous = pixel[0];
+                if x <= 0.18 {
+                    let expected = extended_srgb_oetf(linear_slope * x);
+                    // Input/output storage is fp16; the AP0 matrix is approximately neutral.
+                    for value in [&pixel[..3], &raw[..3]].into_iter().flatten() {
+                        assert!(
+                            (value - expected).abs() <= expected * 0.002 + 1.0e-7,
+                            "linear gain {linear_slope}, headroom {headroom}, x {x}: expected {expected}, got {value}"
+                        );
+                    }
+                    if x == 0.0 {
+                        assert_color(pixel, [0.0; 3]);
+                    } else {
+                        assert!(pixel[0] > 0.0, "finite black floor at {x}");
+                    }
+                } else if linear_slope == 1.0 {
+                    // Compare the new shader shoulder with the previous default tone scale.
+                    let distance = ((x.log2() - original.log_sigmoid_minimum_log2)
+                        * original.log_sigmoid_inverse_dynamic_range)
+                        .min(original.log_sigmoid_maximum_log_coordinate)
+                        - original.log_sigmoid_input_pivot;
+                    let expected = original.log_sigmoid_output_pivot
+                        + original.log_sigmoid_pivot_slope
+                            * distance
+                            * (1.0
+                                + original.sigmoid_shoulder_coefficient
+                                    * distance.powf(original.sigmoid_shoulder_power))
+                            .powf(-1.0 / original.sigmoid_shoulder_power);
+                    assert!(
+                        (raw[0] - expected).abs() <= expected * 0.001 + 1.0e-6,
+                        "original shoulder, headroom {headroom}, x {x}: expected {expected}, got {}",
+                        raw[0]
+                    );
+                }
+            }
         }
     }
 }
@@ -398,7 +513,7 @@ fn drt_gpu_hot_reload_recovers() {
         .unwrap();
     }
     // Other DRT controls must not overwrite the log_shoulder's curve or gamut/hue settings.
-    let log_shoulder = RgbLogShoulderParameters {
+    let log_shoulder = LogShoulderParameters {
         base: ReinhardParameters {
             compression_start: 0.3,
             hue_retention: 0.2,
@@ -409,12 +524,22 @@ fn drt_gpu_hot_reload_recovers() {
     drt.set_rgb_log_shoulder_parameters(log_shoulder);
     drt.set_drt(DrtKind::RgbLogShoulder);
     let log_shoulder_uniform = drt.parameters;
-    drt.set_log_sigmoid_parameters(LogSigmoidParameters::rgb_default());
+    drt.set_rgb_log_sigmoid_parameters(RgbLogSigmoidParameters::default());
     drt.set_rgb_reinhard_parameters(ReinhardParameters {
         compression_start: 0.7,
         ..ReinhardParameters::default()
     });
     drt.set_oklab_reinhard_parameters(ReinhardParameters::oklab_default());
+    let oklab_log_shoulder = LogShoulderParameters {
+        base: ReinhardParameters {
+            compression_start: 0.4,
+            input_scale: 1.5,
+            highlight_reach_ev: 9.0,
+            ..ReinhardParameters::oklab_default()
+        },
+        shoulder_power: 3.0,
+    };
+    drt.set_oklab_log_shoulder_parameters(oklab_log_shoulder);
     assert_eq!(
         bytemuck::bytes_of(&log_shoulder_uniform),
         bytemuck::bytes_of(&drt.parameters)
@@ -439,6 +564,44 @@ fn drt_gpu_hot_reload_recovers() {
         drt.parameters.rgb_hue_retention,
         log_shoulder.base.hue_retention
     );
+
+    // Oklab Log Shoulder keeps its own controls and SDR boundary, even when
+    // other transforms or the display's HDR target change.
+    drt.set_drt(DrtKind::OklabLogShoulder);
+    let oklab_uniform = drt.parameters;
+    let image = crate::image_io::test_pattern(drt.width(), drt.height());
+    let oklab_output = gpu.render(
+        &drt.pipelines.oklab_log_shoulder,
+        oklab_uniform,
+        &image.rgba,
+    );
+    drt.set_rgb_log_shoulder_parameters(LogShoulderParameters::default());
+    drt.set_oklab_reinhard_parameters(ReinhardParameters {
+        compression_start: 0.7,
+        ..ReinhardParameters::oklab_default()
+    });
+    drt.set_agx_s2o3_parameters(LogSigmoidParameters::s2o3_reference());
+    assert_eq!(
+        bytemuck::bytes_of(&oklab_uniform),
+        bytemuck::bytes_of(&drt.parameters)
+    );
+    for headroom in [1.0, 4.0, 64.0] {
+        for kind in DrtKind::ALL {
+            drt.set_drt(kind);
+            drt.set_hdr_headroom(headroom);
+        }
+        drt.set_drt(DrtKind::OklabLogShoulder);
+        assert_eq!(drt.parameters.linear_output_peak, 1.0);
+        assert_eq!(drt.oklab_log_shoulder_parameters, oklab_log_shoulder);
+        assert_eq!(
+            gpu.render(
+                &drt.pipelines.oklab_log_shoulder,
+                drt.parameters,
+                &image.rgba
+            ),
+            oklab_output
+        );
+    }
     drt.set_hdr_headroom(1.0);
     drt.set_drt(DrtKind::RgbReinhard);
     let input = [0.18, 0.18, 0.18, 1.0];
