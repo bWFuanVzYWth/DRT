@@ -8,6 +8,7 @@ mod file_browser;
 mod gpu;
 mod image_io;
 mod lpm_data;
+mod oklab_aces;
 mod presenter;
 mod reference;
 mod tone_curve;
@@ -23,8 +24,8 @@ use crate::comparison::ComparisonView;
 use crate::distribution::{ColorSpace, DEFAULT_PITCH, DEFAULT_YAW, DistributionRenderer};
 use crate::file_browser::{FolderBrowser, Thumbnail, ThumbnailLoader};
 use crate::gpu::{
-    DrtGpu, DrtKind, LinearLogSigmoidParameters, LogSigmoidParameters, OklabChromaParameters,
-    ReinhardParameters,
+    DrtGpu, DrtKind, LinearLogSigmoidParameters, LogSigmoidParameters, OklabAcesParameters,
+    OklabChromaParameters, ReinhardParameters,
 };
 use crate::presenter::{DisplayOutput, StartupOptions};
 use crate::tone_curve::ToneCurveRenderer;
@@ -66,6 +67,7 @@ struct DrtApp {
     agx_s2o3_parameters: LogSigmoidParameters,
     rgb_log_sigmoid_parameters: LinearLogSigmoidParameters,
     oklab_log_sigmoid_parameters: LinearLogSigmoidParameters,
+    oklab_aces_parameters: OklabAcesParameters,
     rgb_log_sigmoid_hue_retention: f32,
     oklab_reinhard_parameters: ReinhardParameters,
     oklab_reinhard_chroma: OklabChromaParameters,
@@ -141,6 +143,7 @@ impl DrtApp {
             agx_s2o3_parameters: LogSigmoidParameters::s2o3_reference(),
             rgb_log_sigmoid_parameters: LinearLogSigmoidParameters::default(),
             oklab_log_sigmoid_parameters: LinearLogSigmoidParameters::default(),
+            oklab_aces_parameters: OklabAcesParameters::default(),
             rgb_log_sigmoid_hue_retention: 0.5,
             oklab_reinhard_parameters: ReinhardParameters::oklab_default(),
             oklab_reinhard_chroma: OklabChromaParameters::default(),
@@ -426,6 +429,9 @@ impl DrtApp {
                         DrtKind::OklabLogSigmoid => {
                             self.gpu.set_oklab_log_sigmoid_parameters(self.oklab_log_sigmoid_parameters)
                         }
+                        DrtKind::OklabAces => {
+                            self.gpu.set_oklab_aces_parameters(self.oklab_aces_parameters)
+                        }
                         DrtKind::RgbLogSigmoid => {
                             self.gpu.set_rgb_log_sigmoid_parameters(self.rgb_log_sigmoid_parameters)
                         }
@@ -560,6 +566,64 @@ impl DrtApp {
                 let active_drt = self.gpu.active_drt();
                 if exposure_changed {
                     self.gpu.set_exposure(self.exposure_ev);
+                }
+                if active_drt == DrtKind::OklabAces {
+                    let mut source = self.oklab_aces_parameters;
+                    ui.separator();
+                    ui.label(RichText::new("ACES-inspired Oklab experiment").strong());
+                    ui.label(RichText::new("Linear shadows · extended highlights · SDR/HDR").small().weak());
+                    let mut changed = ui
+                        .add(
+                            egui::Slider::new(&mut source.linear_slope, 0.1..=4.0)
+                                .step_by(0.025)
+                                .text("Linear slope"),
+                        )
+                        .on_hover_text("Exact scene-linear RGB gain below the shoulder; default 1")
+                        .changed();
+                    source.constrain();
+                    let maximum_start = source.maximum_compression_start();
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut source.compression_start, 0.0..=maximum_start)
+                                .text("Compression start"),
+                        )
+                        .on_hover_text("Linear/shoulder join in Oklab L^3; default 0.18")
+                        .changed();
+                    source.constrain();
+                    let headroom = self.gpu.output_headroom();
+                    let [minimum_reach, maximum_reach] = source.highlight_reach_range(headroom);
+                    let reach_adjustable = maximum_reach - minimum_reach > 0.0001;
+                    let mut highlight_reach = source.curve_for_headroom(headroom).highlight_reach_ev();
+                    if ui
+                        .add_enabled(
+                            reach_adjustable,
+                            egui::Slider::new(&mut highlight_reach, minimum_reach..=maximum_reach)
+                                .step_by(0.25)
+                                .suffix(" EV")
+                                .text("Highlight reach"),
+                        )
+                        .on_hover_text("Scene stops above 18% gray that reach 98% of the current display peak. Smaller values reach white sooner; larger values extend the highlights. SDR default 10 EV. The linear shadows stay unchanged.")
+                        .changed()
+                    {
+                        source.set_highlight_reach_ev(highlight_reach, headroom);
+                        changed = true;
+                    }
+                    if !reach_adjustable {
+                        ui.label(RichText::new("Lower Compression start to adjust highlight reach.").small().weak());
+                    }
+                    source.constrain();
+                    let curve = source.curve_for_headroom(headroom);
+                    ui.label(RichText::new(format!(
+                        "98% peak at +{:.2} EV · gray {:.3} · peak {:.2}",
+                        curve.highlight_reach_ev(),
+                        curve.map_linear(0.18),
+                        curve.output_peak,
+                    )).small().weak());
+                    ui.label(RichText::new("Fixed highlight chroma fade; linear shadows stay unchanged.").small().weak());
+                    self.oklab_aces_parameters = source;
+                    if changed {
+                        self.gpu.set_oklab_aces_parameters(source);
+                    }
                 }
                 if matches!(active_drt, DrtKind::RgbReinhard | DrtKind::OklabReinhard) {
                     let using_oklab = active_drt.is_oklab();
@@ -860,7 +924,7 @@ impl DrtApp {
                         self.gpu.set_rgb_log_sigmoid_hue_retention(self.rgb_log_sigmoid_hue_retention);
                     }
                 }
-                if active_drt.is_oklab() {
+                if matches!(active_drt, DrtKind::OklabReinhard | DrtKind::OklabLogSigmoid) {
                     let mut source = if active_drt == DrtKind::OklabReinhard {
                         self.oklab_reinhard_chroma
                     } else {
@@ -936,6 +1000,7 @@ impl DrtApp {
                     self.agx_s2o3_parameters = LogSigmoidParameters::s2o3_reference();
                     self.rgb_log_sigmoid_parameters = LinearLogSigmoidParameters::default();
                     self.oklab_log_sigmoid_parameters = LinearLogSigmoidParameters::default();
+                    self.oklab_aces_parameters = OklabAcesParameters::default();
                     self.rgb_log_sigmoid_hue_retention = 0.5;
                     self.oklab_reinhard_parameters = ReinhardParameters::oklab_default();
                     self.oklab_reinhard_chroma = OklabChromaParameters::default();
@@ -948,6 +1013,7 @@ impl DrtApp {
                     self.gpu.set_agx_s2o3_parameters(self.agx_s2o3_parameters);
                     self.gpu.set_rgb_log_sigmoid_parameters(self.rgb_log_sigmoid_parameters);
                     self.gpu.set_oklab_log_sigmoid_parameters(self.oklab_log_sigmoid_parameters);
+                    self.gpu.set_oklab_aces_parameters(self.oklab_aces_parameters);
                     self.gpu.set_rgb_log_sigmoid_hue_retention(
                         self.rgb_log_sigmoid_hue_retention,
                     );

@@ -286,6 +286,13 @@ fn drt_gpu_comparison_uses_independent_curves_and_refreshes() {
             ..OklabChromaParameters::default()
         },
     );
+    let mut oklab_aces = crate::oklab_aces::OklabAcesParameters {
+        linear_slope: 0.8,
+        compression_start: 0.35,
+        ..Default::default()
+    };
+    oklab_aces.set_highlight_reach_ev(12.0, 4.0);
+    drt.set_oklab_aces_parameters(oklab_aces);
     drt.set_exposure(1.25);
     drt.set_hdr_headroom(4.0);
     assert!(drt.comparison_texture_id().is_none());
@@ -438,6 +445,15 @@ fn drt_gpu_outputs() {
                 parameters.exposure_multiplier = 4.0;
             }
             parameters.set_reinhard_for_drt(drt, oklab, reinhard, headroom);
+            if drt == DrtKind::OklabAces {
+                let mut source = crate::oklab_aces::OklabAcesParameters::default();
+                if variant >= 3 {
+                    source.linear_slope = 1.5;
+                    source.compression_start = 0.2;
+                    source.set_highlight_reach_ev(14.0, headroom);
+                }
+                parameters.set_oklab_aces_for_headroom(source, headroom);
+            }
             if drt.uses_linear_log_sigmoid() {
                 parameters.set_linear_log_sigmoid_for_headroom(
                     sigmoid,
@@ -1128,3 +1144,5 @@ fn drt_gpu_hot_reload_recovers() {
         .poll(wgpu::PollType::wait_indefinitely())
         .unwrap();
 }
+
+include!("oklab_aces_validation.rs");

@@ -5,7 +5,7 @@
 ## 功能
 
 - 切换不同 DRT，调整曝光与算法参数，实时查看映射结果。
-- 提供 12 个第三方参考 DRT 与独立研究实现；每份移植登记固定远程来源、许可、默认预设和适配差异。
+- 提供 12 个第三方参考 DRT、5 个独立研究实现与 None 基线；每份参考移植登记固定远程来源、许可、默认预设和适配差异。
 - 启用 Compare 对比模式，在同一张图片上用可拖动分割线比较左右 DRT。
 - 结合中性灰轴曲线、颜色分布和数值异常可视化检查输出；灰轴曲线独立于当前图片及其曝光。
 - 提供内置测试图、图片加载和文件夹浏览，支持 EXR、HDR、PNG、JPEG 和 WebP。
@@ -31,6 +31,7 @@ sRGB / Oklab 颜色分布图按当前 DRT 的输出范围自动缩放，并适�
 | AgX-S2O3 | 保留原始 AgX-S2O3 结构的参考移植 | [agx_s2o3.wgsl](shaders/reference/agx_s2o3.wgsl) |
 | Oklab Log Sigmoid | 将 RGB Log Sigmoid 的解析线性暗部与 log2 sigmoid 肩部应用到 Oklab L³，解码回线性亮度后执行 Oklab 色度压缩 | [oklab_log_sigmoid.wgsl](shaders/research/oklab_log_sigmoid.wgsl) |
 | Oklab Reinhard | 在 Oklab L³ 上应用线性段与 Reinhard 肩部，再沿固定 Oklab 色相方向柔性压缩色度 | [oklab_reinhard.wgsl](shaders/research/oklab_reinhard.wgsl) |
+| Oklab ACES-inspired | Oklab L³ 的精确线性暗部与渐近长肩部，色度随明度同比例缩放 | [oklab_aces.wgsl](shaders/research/oklab_aces.wgsl) |
 | RGB Log Sigmoid | 在 log2 坐标中构造解析线性光低段，中灰处与 sigmoid 肩部相切，逐通道输出显示信号 | [rgb_log_sigmoid.wgsl](shaders/research/rgb_log_sigmoid.wgsl) |
 | RGB Reinhard | 逐通道线性段与 Reinhard 肩部，输出线性光后做 sRGB 编码 | [rgb_reinhard.wgsl](shaders/research/rgb_reinhard.wgsl) |
 
@@ -42,30 +43,36 @@ sRGB / Oklab 颜色分布图按当前 DRT 的输出范围自动缩放，并适�
 
 这里的线性保证针对标量曲线与中性灰轴；inset/outset 和 HSV 处理仍可能使彩色暗部偏离 `None`，亮像素中的低值通道也会受新曲线影响。原 `Linear shadows` 开关与过渡混合已移除，`Shadow reach`、`Toe power`、`Mid contrast` 和独立中灰输出控制仅保留于 `AgX-S2O3` 参考。
 
-两款 Oklab DRT 使用 SDR 色域边界，分别保存各自的曲线参数。
+`Oklab Log Sigmoid` 与 `Oklab Reinhard` 使用 SDR 色域边界，分别保存各自的曲线参数。
 
 `Oklab Log Sigmoid` 与 `RGB Log Sigmoid` 共用标量曲线参数和默认值：Linear slope = 1、Compression start = 0.18、Highlight reach = 6.5 EV、Shoulder power = 5.2；各自独立保存设置。移植路径为 `L³ → log2 曲线 → sRGB 解码 → 立方根 → Oklab L`，相同曲线参数下中性灰轴与 RGB 版的 SDR 曲线对应。颜色部分使用现有 Oklab 固定色相方向的柔性色度压缩，因此彩色高光表现与逐通道 RGB 曲线不同；不使用 RGB inset/outset 或 HSV 色相回拉。
 
+`Oklab ACES-inspired` 是借鉴 ACES 2 分离亮度与色彩强度处理的原创实验，不是官方 ACES 移植。统一输入转换后，在 Oklab 中依次处理 `L³ → 长肩部亮度映射 → 色度随明度缩放与固定高光衰减 → 显示 RGB`；不增加白点适应或目标色域边界压缩，支持 SDR/HDR。线性段直接返回 `RGB × Linear slope`，使彩色暗部也与 None 加同等增益一致。
+
+其肩部为 `T = k·j + A·[1 − (1 + q/p)^(−p)]`，其中 `q = k·(L³ − j)/A`、`A = peak − k·j`；在分段点与线性段保持值和一阶导数连续，接点附近的二阶导数有限。`p = 1` 对应渐近 Reinhard 肩部，没有有限的输入白点或 log 黑位截断。界面直接以 `Highlight reach` 控制到达当前输出峰值 98% 所需的输入 EV，默认 SDR 为 +10 EV（相对于 18% 灰）。值越小越快收向白，值越大高光延伸越长；该数值描述肩部长度，并非裁切点。内部在 `p = 0.25–8` 的范围反推肩部幂次，控件的可调范围随线性斜率、分段点与当前 SDR/HDR 峰值实际计算；分段点已达到目标亮度时需降低 `Compression start` 才能调节。
+
+亮度映射后按 `L'/L` 重缩放 Oklab 色度，再固定乘以 `1 − w²`（`w` 为归一化肩部进度），保持裁切前的原始色相方向。这等价于原 `Highlight desaturation = 1.0`、`Pure-color protection = 0.0`；两个控件已删除，固定高光衰减保留。调节高光延伸不改变原有线性暗部。最终仍按显示范围裁切，越界颜色可能因此改变色相或明度；开启异常显示可观察被裁切的范围。
+
 ## 参数约定
 
-选择器按第三方参考与研究实现分组，None 保留为基线。四款自定义 DRT 的曲线参数使用相同命名，各自独立保存设置。AgX-S2O3 保留参考参数与控制，包括默认 0.2 的 inset。新增参考以各自登记的原版默认预设运行，不统一改写中灰或高光颜色行为。
+选择器按第三方参考与研究实现分组，None 保留为基线。五款研究 DRT 各自独立保存设置，相同含义的曲线参数使用相同命名。AgX-S2O3 保留参考参数与控制，包括默认 0.2 的 inset。新增参考以各自登记的原版默认预设运行，不统一改写中灰或高光颜色行为。
 
 | 参数 | 适用范围 | 默认值 / 含义 |
 | --- | --- | --- |
-| Linear slope | 四款自定义 DRT | 1；直接表示线性暗部的输出增益，替代 Reinhard 原来的间接 Input scale |
-| Compression start | 四款自定义 DRT | 0.18；scene-linear RGB / Oklab L³ 的线性段与肩部分段点 |
-| Highlight reach | 四款自定义 DRT | RGB Reinhard 为 10 EV，其余为 6.5 EV；以 18% 灰为基准，最小值随曲线约束 |
-| Shoulder power | 两款 Log Sigmoid | 5.2；Reinhard 的有理肩部不包含独立的幂次控制 |
+| Linear slope | 五款研究 DRT | 1；直接表示线性暗部的输出增益，替代 Reinhard 原来的间接 Input scale |
+| Compression start | 五款研究 DRT | 0.18；scene-linear RGB / Oklab L³ 的线性段与肩部分段点 |
+| Highlight reach | 五款研究 DRT | RGB Reinhard 与 Oklab ACES-inspired 默认 SDR 为 10 EV，其余为 6.5 EV；以 18% 灰为基准，最小值随曲线约束。实验以当前显示峰值的 98% 为目标，SDR/HDR 可调范围随实际峰值计算 |
+| Shoulder power | 两款 Log Sigmoid | 5.2；实验肩部幂次由 Highlight reach 反推，不提供独立幂次控件；原有 Reinhard 不包含独立的幂次控制 |
 | Gamut compression | 两款 RGB | 0.04；虚拟 RGB inset 系数，可调范围 0–0.8 |
 | Hue retention | 两款 RGB | 0.5；全亮度范围一致的 HSV 色相修复强度 |
-| Highlight chroma power | 两款 Oklab | 12；`1 − L^p` 的高光色度衰减幂次 |
-| Gamut rounding power | 两款 Oklab | 4；黑端、白端色域边界相接时的 soft-min 幂次 |
-| Endpoint chroma power | 两款 Oklab | 32；靠近黑白两端的色度压缩幂次 |
-| Midtone chroma power | 两款 Oklab | 16；Oklab L = 0.5 处的色度压缩幂次，向两端平滑过渡 |
+| Highlight chroma power | 原有两款 Oklab | 12；`1 − L^p` 的高光色度衰减幂次 |
+| Gamut rounding power | 原有两款 Oklab | 4；黑端、白端色域边界相接时的 soft-min 幂次 |
+| Endpoint chroma power | 原有两款 Oklab | 32；靠近黑白两端的色度压缩幂次 |
+| Midtone chroma power | 原有两款 Oklab | 16；Oklab L = 0.5 处的色度压缩幂次，向两端平滑过渡 |
 
 分段点上限为 `0.99 / Linear slope`，保证接点输出低于 SDR 白。Reinhard 支持从 0 开始压缩；Log Sigmoid 的分段点必须为正，其下限随斜率计算，使相切肩部能够在 20 EV 的高光范围内到达白点。调整斜率或分段点时会同步约束高光范围。
 
-Oklab 的四个色度控制来自原有的固定系数，默认值保留原效果，且两款 Oklab 分别保存设置。它们不改变灰轴曲线；色相沿 Oklab 原方向保持，因此没有额外的 HSV 修复步骤。色彩空间矩阵和色域边界求解的数值修正继续使用既有常量。
+原有两款 Oklab 的四个色度控制来自既有固定系数，默认值保留原效果，且分别保存设置。它们不改变灰轴曲线；色相沿 Oklab 原方向保持，因此没有额外的 HSV 修复步骤。色彩空间矩阵和色域边界求解的数值修正继续使用既有常量。
 
 ## 运行
 
@@ -95,7 +102,7 @@ cargo clippy --all-targets -- -D warnings
 
 有可用 GPU 时，运行 `cargo test gpu::validation -- --ignored` 检查着色器执行、SDR/HDR 输出、异常值和热重载恢复。
 
-`cargo +stable test --locked -- --include-ignored` 包含新增参考的 420 组独立数值对照，以及全部 17 个 DRT 的 289 种左右对比组合。参考数据生成和来源复现方法见 [验证说明](references/README.md#来源与复现)。
+`cargo +stable test --locked -- --include-ignored` 包含参考的 420 组独立数值对照，以及全部 18 个 DRT 的 324 种左右对比组合。新实验另验证彩色暗部线性、SDR/HDR 长肩部、裁切前色相保持与色度同比例缩放，以及各参数对对比画面的独立更新。参考数据生成和来源复现方法见 [验证说明](references/README.md#来源与复现)。
 
 外部测试图可放入已忽略的 `test-assets/`，不随项目分发。
 

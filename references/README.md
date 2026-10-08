@@ -5,7 +5,7 @@
 ## 目录
 
 - `shaders/reference/`：12 个参考 DRT、共享输入/显示适配层和 `assets/` 内的运行 LUT。
-- `shaders/research/`：四个研究 DRT 与 None 基线。
+- `shaders/research/`：五个研究 DRT 与 None 基线，包括简化 ACES 思路的 Oklab 实验。
 - `shaders/analysis/`：颜色分布与灰轴曲线可视化。
 - `references/entries/`：逐项登记固定远程版本、输入/输出、原始默认值、适配差异和验证证据。
 - `THIRD_PARTY_LICENSES/references/`：保留上游许可和资产署名；未知的许可明确标记，不借用其他实现的许可证。
