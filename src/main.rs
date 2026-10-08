@@ -1152,8 +1152,9 @@ impl DrtApp {
                         ui,
                         egui::pos2(right_rect.center().x, right_rect.top() + 21.0),
                         &format!(
-                            "{} points · complete",
+                            "{} points · 0–{:.2}× SDR white",
                             format_point_count(u64::from(point_count)),
+                            self.gpu.active_output_headroom(),
                         ),
                         egui::TextStyle::Monospace,
                         ui.visuals().weak_text_color(),
@@ -1168,11 +1169,17 @@ impl DrtApp {
                         &mut self.distribution_yaw,
                         &mut self.distribution_pitch,
                         self.color_space,
+                        self.gpu.active_output_headroom(),
                         point_count,
                     );
-                    response.on_hover_text(
-                        "Left-drag to rotate · right-click to restore the default view",
-                    );
+                    let hint = if self.color_space == ColorSpace::Srgb
+                        && self.gpu.active_output_headroom() > 1.0
+                    {
+                        "Left-drag to rotate · right-click to reset\nOuter cube: HDR output range · Inner cube: SDR 0–1"
+                    } else {
+                        "Left-drag to rotate · right-click to restore the default view"
+                    };
+                    response.on_hover_text(hint);
                     ui.advance_cursor_after_rect(available_rect);
                 }
             });

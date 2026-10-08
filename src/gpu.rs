@@ -1052,6 +1052,14 @@ impl DrtGpu {
         self.hdr_headroom
     }
 
+    pub fn active_output_headroom(&self) -> f32 {
+        if self.active_drt == DrtKind::RgbLogSigmoid {
+            self.hdr_headroom
+        } else {
+            direct_output_headroom(self.active_drt, self.hdr_headroom)
+        }
+    }
+
     fn apply_oklab_chroma_parameters(&mut self) {
         let source = match self.active_drt {
             DrtKind::OklabReinhard => self.oklab_reinhard_chroma,

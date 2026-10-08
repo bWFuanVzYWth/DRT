@@ -34,6 +34,41 @@ struct DistributionParameters {
     image_size: [u32; 2],
     space: u32,
     target_is_srgb: u32,
+    // Encoded RGB peak, Oklab L peak, then equal-pixel projection scales.
+    range_and_fit: [f32; 4],
+}
+
+impl DistributionParameters {
+    fn new(
+        rotation: [f32; 2],
+        image_size: [u32; 2],
+        space: ColorSpace,
+        target_is_srgb: bool,
+        headroom: f32,
+        canvas_size: egui::Vec2,
+    ) -> Self {
+        let headroom = headroom.clamp(1.0, 64.0);
+        let encoded_peak = if headroom == 1.0 {
+            1.0
+        } else {
+            1.055 * headroom.powf(1.0 / 2.4) - 0.055
+        };
+        let width = canvas_size.x.max(1.0);
+        let height = canvas_size.y.max(1.0);
+        let shortest = width.min(height);
+        Self {
+            rotation: [rotation[0], rotation[1], 0.0, 0.0],
+            image_size,
+            space: space.shader_value(),
+            target_is_srgb: u32::from(target_is_srgb),
+            range_and_fit: [
+                encoded_peak,
+                headroom.cbrt(),
+                shortest / width,
+                shortest / height,
+            ],
+        }
+    }
 }
 
 pub struct DistributionRenderer;
@@ -75,8 +110,17 @@ impl DistributionRenderer {
         yaw: &mut f32,
         pitch: &mut f32,
         color_space: ColorSpace,
+        output_headroom: f32,
         point_count: u32,
     ) -> egui::Response {
+        let rect = rect.intersect(ui.clip_rect());
+        if !rect.is_positive() {
+            return ui.interact(
+                egui::Rect::from_min_size(rect.min, egui::Vec2::ZERO),
+                ui.id().with("color_distribution_canvas"),
+                egui::Sense::hover(),
+            );
+        }
         let response = ui.interact(
             rect,
             ui.id().with("color_distribution_canvas"),
@@ -103,6 +147,8 @@ impl DistributionRenderer {
                 yaw: *yaw,
                 pitch: *pitch,
                 color_space,
+                output_headroom,
+                canvas_size: rect.size(),
                 point_count,
             },
         ));
@@ -114,6 +160,8 @@ struct DistributionCallback {
     yaw: f32,
     pitch: f32,
     color_space: ColorSpace,
+    output_headroom: f32,
+    canvas_size: egui::Vec2,
     point_count: u32,
 }
 
@@ -129,12 +177,14 @@ impl egui_wgpu::CallbackTrait for DistributionCallback {
         let resources: &DistributionResources = resources
             .get()
             .expect("distribution renderer was installed");
-        let parameters = DistributionParameters {
-            rotation: [self.yaw, self.pitch, 0.0, 0.0],
-            image_size: [resources.width, resources.height],
-            space: self.color_space.shader_value(),
-            target_is_srgb: u32::from(resources.target_is_srgb),
-        };
+        let parameters = DistributionParameters::new(
+            [self.yaw, self.pitch],
+            [resources.width, resources.height],
+            self.color_space,
+            resources.target_is_srgb,
+            self.output_headroom,
+            self.canvas_size,
+        );
         queue.write_buffer(&resources.uniform, 0, bytemuck::bytes_of(&parameters));
         Vec::new()
     }
@@ -153,7 +203,8 @@ impl egui_wgpu::CallbackTrait for DistributionCallback {
         render_pass.draw(0..self.point_count, 0..1);
         if self.color_space == ColorSpace::Srgb {
             render_pass.set_pipeline(&resources.guide_pipeline);
-            render_pass.draw(0..30, 0..1);
+            let guide_vertices = if self.output_headroom > 1.0 { 54 } else { 30 };
+            render_pass.draw(0..guide_vertices, 0..1);
         }
     }
 }
@@ -273,12 +324,14 @@ impl DistributionResources {
             multiview_mask: None,
             cache: None,
         });
-        let parameters = DistributionParameters {
-            rotation: [DEFAULT_YAW, DEFAULT_PITCH, 0.0, 0.0],
-            image_size: [width, height],
-            space: 0,
-            target_is_srgb: u32::from(target_format.is_srgb()),
-        };
+        let parameters = DistributionParameters::new(
+            [DEFAULT_YAW, DEFAULT_PITCH],
+            [width, height],
+            ColorSpace::Srgb,
+            target_format.is_srgb(),
+            1.0,
+            egui::Vec2::splat(1.0),
+        );
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("color distribution parameters"),
             contents: bytemuck::bytes_of(&parameters),
@@ -310,6 +363,14 @@ impl DistributionResources {
             create_bind_group(device, &self.bind_group_layout, output_view, &self.uniform);
     }
 }
+
+#[cfg(test)]
+#[path = "distribution_validation.rs"]
+mod validation;
+
+#[cfg(test)]
+#[path = "distribution_layout_validation.rs"]
+mod layout_validation;
 
 fn create_bind_group(
     device: &wgpu::Device,

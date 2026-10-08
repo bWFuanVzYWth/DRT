@@ -1015,6 +1015,11 @@ fn drt_gpu_hot_reload_recovers() {
         for kind in DrtKind::ALL {
             drt.set_drt(kind);
             drt.set_hdr_headroom(headroom);
+            let expected_range = match kind {
+                DrtKind::None | DrtKind::RgbLogSigmoid | DrtKind::RgbReinhard => headroom,
+                DrtKind::AgxS2O3 | DrtKind::OklabReinhard | DrtKind::OklabLogSigmoid => 1.0,
+            };
+            assert_eq!(drt.active_output_headroom(), expected_range);
         }
         drt.set_drt(DrtKind::OklabLogSigmoid);
         assert_eq!(drt.oklab_log_sigmoid_parameters, oklab_sigmoid);

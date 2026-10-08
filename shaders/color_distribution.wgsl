@@ -3,6 +3,7 @@ struct DistributionParameters {
     image_size : vec2<u32>,
     space : u32,
     target_is_srgb : u32,
+    range_and_fit : vec4<f32>,
 }
 
 @group(0) @binding(0) var output_image : texture_2d<f32>;
@@ -56,7 +57,17 @@ fn project(position : vec3<f32>) -> vec4<f32> {
     let fit = select(0.62, 0.52, parameters.space == 0u);
     // WebGPU clips depth to 0..w. Bias the rotated depth into that interval so
     // the back half of the distribution is not discarded.
-    return vec4<f32>(transformed.xy * fit, 0.5 + transformed.z * 0.1, 1.0);
+    return vec4<f32>(transformed.xy * fit * parameters.range_and_fit.zw, 0.5 + transformed.z * 0.1, 1.0);
+}
+
+fn distribution_position(encoded : vec3<f32>) -> vec3<f32> {
+    if (parameters.space == 0u) {
+        return encoded / parameters.range_and_fit.x * 2.0 - 1.0;
+    }
+    // Oklab is homogeneous in the cube root of linear RGB. Fit the complete
+    // HDR gamut by its lightness peak, retaining SDR white below HDR white.
+    let lab = linear_rgb_to_oklab(srgb_to_linear(encoded)) / parameters.range_and_fit.y;
+    return vec3<f32>(lab.y * 2.5, lab.x * 2.0 - 1.0, lab.z * 2.5);
 }
 
 @vertex
@@ -64,19 +75,11 @@ fn vs_main(@builtin(vertex_index) vertex_index : u32) -> VertexOutput {
     let pixel = vec2<u32>(vertex_index % parameters.image_size.x, vertex_index / parameters.image_size.x);
     let encoded = textureLoad(output_image, pixel, 0).rgb;
 
-    var distribution_position : vec3<f32>;
-    if (parameters.space == 0u) {
-        distribution_position = encoded * 2.0 - 1.0;
-    } else {
-        let lab = linear_rgb_to_oklab(srgb_to_linear(encoded));
-        distribution_position = vec3<f32>(lab.y * 2.5, lab.x * 2.0 - 1.0, lab.z * 2.5);
-    }
-
     // Keep the complete point cloud inside clip space at every rotation. A
     // perspective divide can push points across or beyond a clip plane; this
     // orthographic fit only changes the viewing direction.
     var output : VertexOutput;
-    output.position = project(distribution_position);
+    output.position = project(distribution_position(encoded));
     output.color = encoded;
     output.alpha = 0.24;
     return output;
@@ -99,13 +102,13 @@ fn cube_edge(edge : u32) -> vec2<u32> {
     }
 }
 
-fn cube_corner(index : u32) -> vec3<f32> {
+fn cube_corner(index : u32, peak : f32) -> vec3<f32> {
     let encoded = vec3<f32>(
         f32(index & 1u),
         f32((index >> 1u) & 1u),
         f32((index >> 2u) & 1u)
     );
-    return encoded * 2.0 - 1.0;
+    return distribution_position(encoded * peak);
 }
 
 @vertex
@@ -113,12 +116,20 @@ fn vs_guide(@builtin(vertex_index) vertex_index : u32) -> VertexOutput {
     var position : vec3<f32>;
     var color = vec3<f32>(0.34, 0.38, 0.45);
     var alpha = 0.42;
-    if (vertex_index < 24u) {
-        let edge = cube_edge(vertex_index / 2u);
+    let peak = parameters.range_and_fit.x;
+    let cube_vertices = select(24u, 48u, peak > 1.0);
+    if (vertex_index < cube_vertices) {
+        let edge = cube_edge((vertex_index % 24u) / 2u);
         let corner = select(edge.x, edge.y, (vertex_index & 1u) == 1u);
-        position = cube_corner(corner);
+        let outer_cube = vertex_index < 24u;
+        position = cube_corner(corner, select(1.0, peak, outer_cube));
+        if (!outer_cube) {
+            // Retain the absolute SDR 0..1 reference inside the HDR range.
+            color = vec3<f32>(0.58, 0.64, 0.72);
+            alpha = 0.65;
+        }
     } else {
-        let axis = (vertex_index - 24u) / 2u;
+        let axis = (vertex_index - cube_vertices) / 2u;
         let endpoint = (vertex_index & 1u) == 1u;
         position = vec3<f32>(-1.0);
         if (endpoint) {
