@@ -113,6 +113,19 @@ struct DrtPipelines {
     rgb_reinhard: wgpu::ComputePipeline,
 }
 
+impl DrtPipelines {
+    fn get(&self, drt: DrtKind) -> &wgpu::ComputePipeline {
+        match drt {
+            DrtKind::None => &self.none,
+            DrtKind::OklabReinhard => &self.oklab_reinhard,
+            DrtKind::OklabLogSigmoid => &self.oklab_log_sigmoid,
+            DrtKind::AgxS2O3 => &self.agx_s2o3,
+            DrtKind::RgbLogSigmoid => &self.rgb_log_sigmoid,
+            DrtKind::RgbReinhard => &self.rgb_reinhard,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReinhardParameters {
     pub linear_slope: f32,
@@ -626,6 +639,13 @@ struct ImageResources {
     height: u32,
 }
 
+struct ComparisonResources {
+    _output: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+    uniform: wgpu::Buffer,
+    texture_id: egui::TextureId,
+}
+
 struct CurveResources {
     _input: wgpu::Texture,
     _output: wgpu::Texture,
@@ -639,6 +659,8 @@ pub struct DrtGpu {
     pipeline_layout: wgpu::PipelineLayout,
     pipelines: DrtPipelines,
     active_drt: DrtKind,
+    comparison_drt: Option<DrtKind>,
+    comparison: Option<ComparisonResources>,
     sampler: wgpu::Sampler,
     uniform: wgpu::Buffer,
     curve_uniform: wgpu::Buffer,
@@ -746,6 +768,8 @@ impl DrtGpu {
             pipeline_layout,
             pipelines,
             active_drt: DrtKind::OklabReinhard,
+            comparison_drt: None,
+            comparison: None,
             sampler,
             uniform,
             curve_uniform,
@@ -769,14 +793,7 @@ impl DrtGpu {
 
     pub fn set_image(&mut self, image: LinearImage) -> Result<()> {
         let previous_id = self.image.texture_id;
-        self.parameters.width = image.width;
-        self.parameters.height = image.height;
-        self.render_state.queue.write_buffer(
-            &self.uniform,
-            0,
-            bytemuck::bytes_of(&self.parameters),
-        );
-        self.image = create_image_resources(
+        let next_image = create_image_resources(
             &self.render_state,
             &self.bind_group_layout,
             &self.sampler,
@@ -784,6 +801,26 @@ impl DrtGpu {
             image,
             Some(previous_id),
         )?;
+        self.parameters.width = next_image.width;
+        self.parameters.height = next_image.height;
+        self.render_state.queue.write_buffer(
+            &self.uniform,
+            0,
+            bytemuck::bytes_of(&self.parameters),
+        );
+        self.image = next_image;
+        if let Some(drt) = self.comparison_drt {
+            self.comparison = Some(create_comparison_resources(
+                &self.render_state,
+                &self.bind_group_layout,
+                &self.sampler,
+                &self.image,
+                self.parameters_for_drt(drt),
+                self.comparison
+                    .as_ref()
+                    .map(|resources| resources.texture_id),
+            ));
+        }
         DistributionRenderer::install(
             &self.render_state,
             &self.image.analysis_view,
@@ -934,6 +971,37 @@ impl DrtGpu {
         self.active_drt
     }
 
+    pub fn set_comparison_drt(&mut self, drt: Option<DrtKind>) {
+        if self.comparison_drt == drt {
+            return;
+        }
+        self.comparison_drt = drt;
+        if let Some(drt) = drt {
+            if self.comparison.is_none() {
+                self.comparison = Some(create_comparison_resources(
+                    &self.render_state,
+                    &self.bind_group_layout,
+                    &self.sampler,
+                    &self.image,
+                    self.parameters_for_drt(drt),
+                    None,
+                ));
+            }
+            self.dispatch();
+        } else if let Some(resources) = self.comparison.take() {
+            self.render_state
+                .renderer
+                .write()
+                .free_texture(&resources.texture_id);
+        }
+    }
+
+    pub fn comparison_texture_id(&self) -> Option<egui::TextureId> {
+        self.comparison
+            .as_ref()
+            .map(|resources| resources.texture_id)
+    }
+
     pub fn reload_shader(&mut self, drt: DrtKind, source: &Path) -> Result<()> {
         let shader = std::fs::read_to_string(source)
             .with_context(|| format!("cannot read {}", source.display()))?;
@@ -954,7 +1022,7 @@ impl DrtGpu {
             DrtKind::RgbLogSigmoid => self.pipelines.rgb_log_sigmoid = next,
             DrtKind::RgbReinhard => self.pipelines.rgb_reinhard = next,
         }
-        if self.active_drt == drt {
+        if self.active_drt == drt || self.comparison_drt == Some(drt) {
             self.dispatch();
         }
         Ok(())
@@ -1017,7 +1085,42 @@ impl DrtGpu {
         );
     }
 
+    fn parameters_for_drt(&self, drt: DrtKind) -> Parameters {
+        // Exposure, anomaly display, dimensions, and RGB hue retention are
+        // shared. Each side takes its curve and chroma values from that DRT's
+        // saved controls, without changing the active side's parameters.
+        let mut parameters = self.parameters;
+        match drt {
+            DrtKind::OklabReinhard => parameters.set_oklab_chroma(self.oklab_reinhard_chroma),
+            DrtKind::OklabLogSigmoid => parameters.set_oklab_chroma(self.oklab_log_sigmoid_chroma),
+            _ => {}
+        }
+        match drt {
+            DrtKind::RgbLogSigmoid => parameters.set_linear_log_sigmoid_for_headroom(
+                self.rgb_log_sigmoid_parameters,
+                self.hdr_headroom,
+            ),
+            DrtKind::OklabLogSigmoid => parameters
+                .set_linear_log_sigmoid_for_headroom(self.oklab_log_sigmoid_parameters, 1.0),
+            _ => parameters.set_log_sigmoid_for_headroom(self.agx_s2o3_parameters, 1.0),
+        }
+        parameters.set_reinhard_for_drt(
+            drt,
+            self.oklab_reinhard_parameters,
+            self.rgb_reinhard_parameters,
+            self.hdr_headroom,
+        );
+        parameters
+    }
+
     fn dispatch(&mut self) {
+        if let (Some(drt), Some(resources)) = (self.comparison_drt, &self.comparison) {
+            self.render_state.queue.write_buffer(
+                &resources.uniform,
+                0,
+                bytemuck::bytes_of(&self.parameters_for_drt(drt)),
+            );
+        }
         let curve_parameters = curve_parameters(self.parameters);
         self.render_state.queue.write_buffer(
             &self.curve_uniform,
@@ -1035,16 +1138,7 @@ impl DrtGpu {
                 label: Some("DRT pass"),
                 timestamp_writes: None,
             });
-            let pipeline = match self.active_drt {
-                DrtKind::None => &self.pipelines.none,
-                DrtKind::OklabReinhard => &self.pipelines.oklab_reinhard,
-
-                DrtKind::OklabLogSigmoid => &self.pipelines.oklab_log_sigmoid,
-                DrtKind::AgxS2O3 => &self.pipelines.agx_s2o3,
-                DrtKind::RgbLogSigmoid => &self.pipelines.rgb_log_sigmoid,
-                DrtKind::RgbReinhard => &self.pipelines.rgb_reinhard,
-            };
-            pass.set_pipeline(pipeline);
+            pass.set_pipeline(self.pipelines.get(self.active_drt));
             pass.set_bind_group(0, &self.image.bind_group, &[]);
             pass.dispatch_workgroups(
                 self.image.width.div_ceil(8),
@@ -1053,6 +1147,15 @@ impl DrtGpu {
             );
             pass.set_bind_group(0, &self.curve.bind_group, &[]);
             pass.dispatch_workgroups(SAMPLE_COUNT.div_ceil(8), 1, 1);
+            if let (Some(drt), Some(resources)) = (self.comparison_drt, &self.comparison) {
+                pass.set_pipeline(self.pipelines.get(drt));
+                pass.set_bind_group(0, &resources.bind_group, &[]);
+                pass.dispatch_workgroups(
+                    self.image.width.div_ceil(8),
+                    self.image.height.div_ceil(8),
+                    1,
+                );
+            }
         }
         self.render_state.queue.submit([encoder.finish()]);
     }
@@ -1336,6 +1439,90 @@ fn create_curve_resources(
         _output: output,
         bind_group,
         output_view,
+    }
+}
+
+fn create_comparison_resources(
+    render_state: &egui_wgpu::RenderState,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    image: &ImageResources,
+    parameters: Parameters,
+    reuse_id: Option<egui::TextureId>,
+) -> ComparisonResources {
+    let device = &render_state.device;
+    let output = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("DRT comparison extended-sRGB output"),
+        size: wgpu::Extent3d {
+            width: image.width,
+            height: image.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | if cfg!(test) {
+                wgpu::TextureUsages::COPY_SRC
+            } else {
+                wgpu::TextureUsages::empty()
+            },
+        view_formats: &[],
+    });
+    let input_view = image._input.create_view(&Default::default());
+    let storage_view = output.create_view(&Default::default());
+    let display_view = output.create_view(&wgpu::TextureViewDescriptor {
+        usage: Some(wgpu::TextureUsages::TEXTURE_BINDING),
+        ..Default::default()
+    });
+    let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("DRT comparison parameters"),
+        contents: bytemuck::bytes_of(&parameters),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("DRT comparison bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&input_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(&storage_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: uniform.as_entire_binding(),
+            },
+        ],
+    });
+    let texture_id = {
+        let mut renderer = render_state.renderer.write();
+        if let Some(id) = reuse_id {
+            renderer.update_egui_texture_from_wgpu_texture(
+                device,
+                &display_view,
+                wgpu::FilterMode::Linear,
+                id,
+            );
+            id
+        } else {
+            renderer.register_native_texture(device, &display_view, wgpu::FilterMode::Linear)
+        }
+    };
+    ComparisonResources {
+        _output: output,
+        bind_group,
+        uniform,
+        texture_id,
     }
 }
 

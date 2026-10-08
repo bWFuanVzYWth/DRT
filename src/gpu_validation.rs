@@ -35,6 +35,63 @@ impl TestGpu {
         }
     }
 
+    fn render_state(&self) -> egui_wgpu::RenderState {
+        let target_format = wgpu::TextureFormat::Rgba16Float;
+        let renderer = egui_wgpu::Renderer::new(&self.device, target_format, Default::default());
+        egui_wgpu::RenderState {
+            adapter: self.adapter.clone(),
+            available_adapters: vec![self.adapter.clone()],
+            instance: self.instance.clone(),
+            device: self.device.clone(),
+            queue: self.queue.clone(),
+            target_format,
+            renderer: std::sync::Arc::new(egui::epaint::mutex::RwLock::new(renderer)),
+            surface_config: egui_wgpu::SurfaceConfig::HIGH_THROUGHPUT,
+        }
+    }
+
+    fn read_texture(&self, texture: &wgpu::Texture) -> Vec<f32> {
+        let extent = texture.size();
+        let row_bytes = (extent.width * 8).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("DRT comparison validation readback"),
+            size: u64::from(row_bytes * extent.height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row_bytes),
+                    rows_per_image: Some(extent.height),
+                },
+            },
+            extent,
+        );
+        self.queue.submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |result| result.unwrap());
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        let bytes = slice.get_mapped_range().unwrap();
+        bytes
+            .chunks_exact(row_bytes as usize)
+            .flat_map(|row| {
+                row[..(extent.width * 8) as usize]
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| half::f16::from_le_bytes([pair[0], pair[1]]).to_f32())
+            })
+            .collect()
+    }
+
     fn render(
         &self,
         pipeline: &wgpu::ComputePipeline,
@@ -153,6 +210,163 @@ impl TestGpu {
             })
             .collect()
     }
+}
+
+#[test]
+#[ignore = "requires a GPU; run with --ignored --nocapture"]
+fn drt_gpu_comparison_uses_independent_curves_and_refreshes() {
+    let gpu = TestGpu::new();
+    let render_state = gpu.render_state();
+    let mut image = crate::image_io::test_pattern(31, 7);
+    let mut drt = DrtGpu::new(&render_state, image.clone()).unwrap();
+    drt.set_rgb_log_sigmoid_parameters(LinearLogSigmoidParameters {
+        linear_slope: 0.5,
+        compression_start: 0.4,
+        highlight_ev: 12.0,
+        ..LinearLogSigmoidParameters::default()
+    });
+    drt.set_oklab_log_sigmoid_parameters(LinearLogSigmoidParameters {
+        linear_slope: 1.5,
+        compression_start: 0.3,
+        highlight_ev: 8.0,
+        ..LinearLogSigmoidParameters::default()
+    });
+    drt.set_rgb_reinhard_parameters(ReinhardParameters {
+        linear_slope: 0.75,
+        compression_start: 0.5,
+        highlight_reach_ev: 12.0,
+        ..ReinhardParameters::default()
+    });
+    drt.set_oklab_reinhard_parameters(ReinhardParameters {
+        linear_slope: 2.0,
+        compression_start: 0.1,
+        highlight_reach_ev: 7.0,
+        ..ReinhardParameters::oklab_default()
+    });
+    drt.set_oklab_chroma_parameters(
+        DrtKind::OklabLogSigmoid,
+        OklabChromaParameters {
+            highlight_chroma_power: 20.0,
+            ..OklabChromaParameters::default()
+        },
+    );
+    drt.set_exposure(1.25);
+    drt.set_hdr_headroom(4.0);
+    assert!(drt.comparison_texture_id().is_none());
+    let mut texture_id = None;
+    for left in DrtKind::ALL {
+        drt.set_drt(left);
+        for right in DrtKind::ALL {
+            let previous_parameters = bytemuck::bytes_of(&drt.parameters).to_vec();
+            drt.set_comparison_drt(Some(right));
+            let id = drt.comparison_texture_id().unwrap();
+            assert_eq!(*texture_id.get_or_insert(id), id);
+            assert_eq!(drt.active_drt(), left);
+            assert_eq!(bytemuck::bytes_of(&drt.parameters), previous_parameters);
+            let comparison = gpu.read_texture(&drt.comparison.as_ref().unwrap()._output);
+            // Selecting the right DRT as the regular output provides an
+            // independent reference for its saved parameters and HDR behavior.
+            drt.set_drt(right);
+            let expected = gpu.render(drt.pipelines.get(right), drt.parameters, &image.rgba);
+            assert_eq!(comparison, expected, "{} / {}", left.label(), right.label());
+            drt.set_drt(left);
+        }
+    }
+
+    drt.set_drt(DrtKind::RgbReinhard);
+    drt.set_comparison_drt(Some(DrtKind::OklabLogSigmoid));
+    for (exposure, headroom, anomalies) in [(0.0, 1.0, true), (-1.0, 64.0, false)] {
+        drt.set_exposure(exposure);
+        drt.set_hdr_headroom(headroom);
+        drt.set_show_anomalies(anomalies);
+        drt.set_oklab_log_sigmoid_parameters(LinearLogSigmoidParameters {
+            linear_slope: 0.4,
+            compression_start: 0.5,
+            ..LinearLogSigmoidParameters::default()
+        });
+        let comparison = gpu.read_texture(&drt.comparison.as_ref().unwrap()._output);
+        drt.set_drt(DrtKind::OklabLogSigmoid);
+        assert_eq!(
+            comparison,
+            gpu.render(
+                drt.pipelines.get(drt.active_drt),
+                drt.parameters,
+                &image.rgba
+            )
+        );
+        drt.set_drt(DrtKind::RgbReinhard);
+    }
+
+    assert!(
+        drt.set_image(LinearImage {
+            width: 0,
+            height: 0,
+            rgba: vec![]
+        })
+        .is_err()
+    );
+    assert_eq!((drt.width(), drt.height()), (image.width, image.height));
+    assert_eq!(drt.comparison_texture_id(), texture_id);
+    image = crate::image_io::test_pattern(9, 17);
+    drt.set_image(image.clone()).unwrap();
+    assert_eq!(drt.comparison_texture_id(), texture_id);
+    let comparison = gpu.read_texture(&drt.comparison.as_ref().unwrap()._output);
+    drt.set_drt(DrtKind::OklabLogSigmoid);
+    assert_eq!(
+        comparison,
+        gpu.render(
+            drt.pipelines.get(drt.active_drt),
+            drt.parameters,
+            &image.rgba
+        )
+    );
+    drt.set_drt(DrtKind::RgbReinhard);
+
+    // A shader used only by the comparison side must dispatch immediately.
+    let file =
+        std::env::temp_dir().join(format!("drt-comparison-test-{}.wgsl", std::process::id()));
+    std::fs::write(&file, "invalid WGSL").unwrap();
+    assert!(drt.reload_shader(DrtKind::OklabLogSigmoid, &file).is_err());
+    assert_eq!(
+        gpu.read_texture(&drt.comparison.as_ref().unwrap()._output),
+        comparison
+    );
+    std::fs::write(
+        &file,
+        r#"
+        @group(0) @binding(2) var output: texture_storage_2d<rgba16float, write>;
+        @compute @workgroup_size(8, 8, 1)
+        fn main(@builtin(global_invocation_id) id: vec3u) {
+            if (all(id.xy < textureDimensions(output))) {
+                textureStore(output, vec2i(id.xy), vec4f(0.25, 0.5, 0.75, 1.0));
+            }
+        }
+        "#,
+    )
+    .unwrap();
+    drt.reload_shader(DrtKind::OklabLogSigmoid, &file).unwrap();
+    std::fs::remove_file(&file).unwrap();
+    for pixel in gpu
+        .read_texture(&drt.comparison.as_ref().unwrap()._output)
+        .as_chunks::<4>()
+        .0
+    {
+        assert_color(pixel, [0.25, 0.5, 0.75]);
+    }
+    assert_eq!(drt.active_drt(), DrtKind::RgbReinhard);
+    drt.set_comparison_drt(None);
+    assert!(drt.comparison_texture_id().is_none());
+    assert!(drt.comparison.is_none());
+    drt.set_comparison_drt(Some(DrtKind::None));
+    assert_ne!(drt.comparison_texture_id(), texture_id);
+    assert_eq!(
+        gpu.read_texture(&drt.comparison.as_ref().unwrap()._output),
+        gpu.render(
+            drt.pipelines.get(DrtKind::None),
+            drt.parameters_for_drt(DrtKind::None),
+            &image.rgba
+        )
+    );
 }
 
 #[test]

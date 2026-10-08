@@ -1,3 +1,6 @@
+mod comparison;
+#[cfg(test)]
+mod comparison_validation;
 mod distribution;
 mod file_browser;
 mod gpu;
@@ -12,6 +15,7 @@ use std::{
 
 use eframe::egui::{self, Color32, RichText, Vec2};
 
+use crate::comparison::ComparisonView;
 use crate::distribution::{ColorSpace, DEFAULT_PITCH, DEFAULT_YAW, DistributionRenderer};
 use crate::file_browser::{FolderBrowser, Thumbnail, ThumbnailLoader};
 use crate::gpu::{
@@ -71,6 +75,7 @@ struct DrtApp {
     shader_modified: [Option<std::time::SystemTime>; DrtKind::ALL.len()],
     last_shader_check: std::time::Instant,
     workspace_view: WorkspaceView,
+    comparison: ComparisonView,
     color_space: ColorSpace,
     distribution_yaw: f32,
     distribution_pitch: f32,
@@ -148,6 +153,7 @@ impl DrtApp {
             shader_modified,
             last_shader_check: std::time::Instant::now(),
             workspace_view: initial_view,
+            comparison: ComparisonView::default(),
             color_space: ColorSpace::Srgb,
             distribution_yaw: DEFAULT_YAW,
             distribution_pitch: DEFAULT_PITCH,
@@ -281,6 +287,21 @@ impl DrtApp {
         }
     }
 
+    fn reload_visible_shaders(&mut self) {
+        self.reload_shader(self.gpu.active_drt());
+        if self.comparison.enabled && self.comparison.right_drt != self.gpu.active_drt() {
+            let left_error = self.status_error.then(|| self.status.clone());
+            self.reload_shader(self.comparison.right_drt);
+            if let Some(error) = left_error {
+                if self.status_error {
+                    self.set_status(format!("{error}\n{}", self.status), true);
+                } else {
+                    self.set_status(error, true);
+                }
+            }
+        }
+    }
+
     fn poll_shader(&mut self, context: &egui::Context) {
         if self.last_shader_check.elapsed() < std::time::Duration::from_millis(400) {
             context.request_repaint_after(std::time::Duration::from_millis(400));
@@ -333,7 +354,7 @@ impl DrtApp {
                 });
                 ui.menu_button("Shader", |ui| {
                     if ui.button("Recompile  F5").clicked() {
-                        self.reload_shader(self.gpu.active_drt());
+                        self.reload_visible_shaders();
                         ui.close();
                     }
                     ui.label("Auto-reloads every DRT shader");
@@ -345,6 +366,18 @@ impl DrtApp {
                     WorkspaceView::Analysis,
                     "Image + Distribution",
                 );
+                ui.separator();
+                if ui
+                    .checkbox(&mut self.comparison.enabled, "Compare")
+                    .changed()
+                    && self.comparison.enabled
+                    && self.comparison.right_drt == self.gpu.active_drt()
+                {
+                    self.comparison.right_drt = DrtKind::ALL
+                        .into_iter()
+                        .find(|drt| *drt != self.gpu.active_drt())
+                        .expect("multiple DRTs available");
+                }
                 ui.separator();
                 ui.label(RichText::new("wgpu · WGSL · egui").monospace().weak());
             });
@@ -378,7 +411,7 @@ impl DrtApp {
                     }
                 }
                 ui.separator();
-                ui.label("DRT");
+                ui.label(if self.comparison.enabled { "Left DRT" } else { "DRT" });
                 let mut selected_drt = self.gpu.active_drt();
                 ui.horizontal_wrapped(|ui| {
                     for drt in DrtKind::ALL {
@@ -405,7 +438,38 @@ impl DrtApp {
                     self.gpu.set_drt(selected_drt);
                     self.set_status(format!("Switched to {}", selected_drt.label()), false);
                 }
+                if self.comparison.enabled {
+                    ui.horizontal(|ui| {
+                        ui.label("Right DRT");
+                        egui::ComboBox::from_id_salt("comparison-right-drt")
+                            .selected_text(self.comparison.right_drt.label())
+                            .show_ui(ui, |ui| {
+                                for drt in DrtKind::ALL {
+                                    ui.selectable_value(&mut self.comparison.right_drt, drt, drt.label())
+                                        .on_hover_text(drt.description());
+                                }
+                            });
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Swap sides").clicked() {
+                            let left = self.gpu.active_drt();
+                            self.gpu.set_drt(self.comparison.right_drt);
+                            self.comparison.right_drt = left;
+                        }
+                        if ui.button("Center divider").clicked() {
+                            self.comparison.split = 0.5;
+                        }
+                    });
+                    ui.label(RichText::new("Shared image and exposure · swap to adjust the other DRT")
+                        .small().weak());
+                    ui.label(RichText::new("Drag the divider · double-click to center")
+                        .small().weak());
+                }
+                self.gpu.set_comparison_drt(self.comparison.enabled.then_some(self.comparison.right_drt));
                 ui.separator();
+                if self.comparison.enabled {
+                    ui.label(RichText::new("Left DRT curve and parameters").small().weak());
+                }
                 ToneCurveRenderer::paint(ui, self.gpu.active_drt().label());
                 ui.separator();
                 ui.label(RichText::new("Display range").strong());
@@ -998,7 +1062,16 @@ impl DrtApp {
                 ui.separator();
                 ui.label(format!("Backend: {:?}", self.gpu.backend()));
                 ui.separator();
-                ui.label(format!("DRT: {}", self.gpu.active_drt().label()));
+                let drt_label = if self.comparison.enabled {
+                    format!(
+                        "Left: {} · Right: {}",
+                        self.gpu.active_drt().label(),
+                        self.comparison.right_drt.label()
+                    )
+                } else {
+                    format!("DRT: {}", self.gpu.active_drt().label())
+                };
+                ui.label(drt_label);
                 ui.separator();
                 ui.label(format!(
                     "Exposure multiplier: {:.3}",
@@ -1010,12 +1083,20 @@ impl DrtApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(ui.style()).fill(Color32::from_gray(18)))
             .show(ui, |ui| match self.workspace_view {
-                WorkspaceView::Image => show_image(
-                    ui,
-                    self.gpu.texture_id(),
-                    self.gpu.width(),
-                    self.gpu.height(),
-                ),
+                WorkspaceView::Image => {
+                    if self.comparison.enabled {
+                        let bounds = ui.available_rect_before_wrap();
+                        self.paint_workspace_image(ui, bounds);
+                        ui.advance_cursor_after_rect(bounds);
+                    } else {
+                        show_image(
+                            ui,
+                            self.gpu.texture_id(),
+                            self.gpu.width(),
+                            self.gpu.height(),
+                        );
+                    }
+                }
                 WorkspaceView::Analysis => {
                     let point_count = exact_point_count(self.gpu.width(), self.gpu.height());
                     let available_rect = ui.available_rect_before_wrap();
@@ -1036,15 +1117,16 @@ impl DrtApp {
                     paint_centered_label(
                         ui,
                         egui::pos2(left_rect.center().x, left_rect.top()),
-                        "Mapped image",
+                        if self.comparison.enabled {
+                            "DRT comparison"
+                        } else {
+                            "Mapped image"
+                        },
                         egui::TextStyle::Body,
                         ui.visuals().strong_text_color(),
                     );
-                    paint_image_in_rect(
+                    self.paint_workspace_image(
                         ui,
-                        self.gpu.texture_id(),
-                        self.gpu.width(),
-                        self.gpu.height(),
                         egui::Rect::from_min_max(
                             egui::pos2(left_rect.left(), left_rect.top() + header_height),
                             left_rect.max,
@@ -1054,7 +1136,15 @@ impl DrtApp {
                     paint_centered_label(
                         ui,
                         egui::pos2(right_rect.center().x, right_rect.top()),
-                        &format!("{} distribution", self.color_space.label()),
+                        &if self.comparison.enabled {
+                            format!(
+                                "{} · {} distribution (left)",
+                                self.gpu.active_drt().label(),
+                                self.color_space.label()
+                            )
+                        } else {
+                            format!("{} distribution", self.color_space.label())
+                        },
                         egui::TextStyle::Body,
                         ui.visuals().strong_text_color(),
                     );
@@ -1063,7 +1153,7 @@ impl DrtApp {
                         egui::pos2(right_rect.center().x, right_rect.top() + 21.0),
                         &format!(
                             "{} points · complete",
-                            format_point_count(u64::from(point_count))
+                            format_point_count(u64::from(point_count)),
                         ),
                         egui::TextStyle::Monospace,
                         ui.visuals().weak_text_color(),
@@ -1098,10 +1188,32 @@ impl DrtApp {
             self.open_folder(&context);
         }
         if reload {
-            self.reload_shader(self.gpu.active_drt());
+            self.reload_visible_shaders();
         }
         if close {
             context.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    fn paint_workspace_image(&mut self, ui: &mut egui::Ui, bounds: egui::Rect) {
+        if let Some(right_texture) = self.gpu.comparison_texture_id() {
+            self.comparison.paint(
+                ui,
+                bounds,
+                self.gpu.texture_id(),
+                right_texture,
+                Vec2::new(self.gpu.width() as f32, self.gpu.height() as f32),
+                self.gpu.active_drt().label(),
+                self.comparison.right_drt.label(),
+            );
+        } else {
+            paint_image_in_rect(
+                ui,
+                self.gpu.texture_id(),
+                self.gpu.width(),
+                self.gpu.height(),
+                bounds,
+            );
         }
     }
 }
