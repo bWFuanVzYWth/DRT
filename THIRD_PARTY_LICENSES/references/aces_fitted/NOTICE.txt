@@ -1,0 +1,15 @@
+Narkowicz ACESFilm five-coefficient fit
+Author: Krzysztof Narkowicz, 2016.
+
+Original source and licensing statement:
+https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
+
+Author's explicit grant for the HLSL function:
+"Fitted curve's HLSL source code (free to use under public domain CC0 or MIT license)"
+
+This WGSL port chooses the offered CC0-1.0 option.
+Port modifications: WGSL syntax, AP0 to Rec.709 adapter, negative-input clipping,
+and common workbench output-encoding integration.
+
+Author-page snapshot SHA-256:
+d848a767b10280db23c2766d09a0faa50fc1e4ece6793265f860ab752bb4c617

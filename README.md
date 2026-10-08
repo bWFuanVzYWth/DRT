@@ -5,6 +5,7 @@
 ## 功能
 
 - 切换不同 DRT，调整曝光与算法参数，实时查看映射结果。
+- 提供 12 个第三方参考 DRT 与独立研究实现；每份移植登记固定远程来源、许可、默认预设和适配差异。
 - 启用 Compare 对比模式，在同一张图片上用可拖动分割线比较左右 DRT。
 - 结合中性灰轴曲线、颜色分布和数值异常可视化检查输出；灰轴曲线独立于当前图片及其曝光。
 - 提供内置测试图、图片加载和文件夹浏览，支持 EXR、HDR、PNG、JPEG 和 WebP。
@@ -22,14 +23,16 @@ sRGB / Oklab 颜色分布图按当前 DRT 的输出范围自动缩放，并适�
 
 项目中的自定义 DRT 按“颜色处理模型 + 曲线类型”命名。`RGB` 指通过中性轴 inset/outset 进入和离开的虚拟 RGB 工作坐标；两款 RGB DRT 均逐通道应用曲线，并提供 HSV 色相回拉。HSV 是曲线之后的调整步骤。
 
+第三方参考放在 [shaders/reference/](shaders/reference/)，研究实现放在 [shaders/research/](shaders/research/)。参考包括 AgX-S2O3、ACES 1.3、ACES 2、Blender AgX、Filmic、AMD LPM、Hable、Khronos PBR Neutral、Lottes、OpenDRT、Uchimura 和 Narkowicz ACES Filmic Fit；完整预设、不可变源码链接和验证记录见 [参考登记](references/README.md)。上游原始资料下载到项目内 `third_party/reference_sources/`，不进入 Git；运行所需移植 LUT 进入 Git。
+
 | 名称 | 主要结构 | 着色器 |
 | --- | --- | --- |
-| None | 无色调压缩，执行显示转换与范围裁切 | [none_drt.wgsl](shaders/none_drt.wgsl) |
-| AgX-S2O3 | 保留原始 AgX-S2O3 结构的参考移植 | [agx_s2o3.wgsl](shaders/agx_s2o3.wgsl) |
-| Oklab Log Sigmoid | 将 RGB Log Sigmoid 的解析线性暗部与 log2 sigmoid 肩部应用到 Oklab L³，解码回线性亮度后执行 Oklab 色度压缩 | [oklab_log_sigmoid.wgsl](shaders/oklab_log_sigmoid.wgsl) |
-| Oklab Reinhard | 在 Oklab L³ 上应用线性段与 Reinhard 肩部，再沿固定 Oklab 色相方向柔性压缩色度 | [oklab_reinhard.wgsl](shaders/oklab_reinhard.wgsl) |
-| RGB Log Sigmoid | 在 log2 坐标中构造解析线性光低段，中灰处与 sigmoid 肩部相切，逐通道输出显示信号 | [rgb_log_sigmoid.wgsl](shaders/rgb_log_sigmoid.wgsl) |
-| RGB Reinhard | 逐通道线性段与 Reinhard 肩部，输出线性光后做 sRGB 编码 | [rgb_reinhard.wgsl](shaders/rgb_reinhard.wgsl) |
+| None | 无色调压缩，执行显示转换与范围裁切 | [none_drt.wgsl](shaders/research/none_drt.wgsl) |
+| AgX-S2O3 | 保留原始 AgX-S2O3 结构的参考移植 | [agx_s2o3.wgsl](shaders/reference/agx_s2o3.wgsl) |
+| Oklab Log Sigmoid | 将 RGB Log Sigmoid 的解析线性暗部与 log2 sigmoid 肩部应用到 Oklab L³，解码回线性亮度后执行 Oklab 色度压缩 | [oklab_log_sigmoid.wgsl](shaders/research/oklab_log_sigmoid.wgsl) |
+| Oklab Reinhard | 在 Oklab L³ 上应用线性段与 Reinhard 肩部，再沿固定 Oklab 色相方向柔性压缩色度 | [oklab_reinhard.wgsl](shaders/research/oklab_reinhard.wgsl) |
+| RGB Log Sigmoid | 在 log2 坐标中构造解析线性光低段，中灰处与 sigmoid 肩部相切，逐通道输出显示信号 | [rgb_log_sigmoid.wgsl](shaders/research/rgb_log_sigmoid.wgsl) |
+| RGB Reinhard | 逐通道线性段与 Reinhard 肩部，输出线性光后做 sRGB 编码 | [rgb_reinhard.wgsl](shaders/research/rgb_reinhard.wgsl) |
 
 `AgX-S2O3` 是 linlin 对原始参考的移植，结构与原始参考相同，但并非 AgX 原作者的原始 Python 实现。本仓库的 WGSL 版本移植自 linlin 的 GLSL 参考移植，具体来源版本记录在文件头；linlin 的署名指移植实现，原始算法来源仍为 AgX-S2O3。该参考保留原名。
 
@@ -45,7 +48,7 @@ sRGB / Oklab 颜色分布图按当前 DRT 的输出范围自动缩放，并适�
 
 ## 参数约定
 
-选择顺序为 None、AgX-S2O3、Oklab Log Sigmoid、Oklab Reinhard、RGB Log Sigmoid、RGB Reinhard。四款自定义 DRT 的曲线参数使用相同命名，各自独立保存设置。AgX-S2O3 保留参考参数与控制，包括默认 0.2 的 inset。
+选择器按第三方参考与研究实现分组，None 保留为基线。四款自定义 DRT 的曲线参数使用相同命名，各自独立保存设置。AgX-S2O3 保留参考参数与控制，包括默认 0.2 的 inset。新增参考以各自登记的原版默认预设运行，不统一改写中灰或高光颜色行为。
 
 | 参数 | 适用范围 | 默认值 / 含义 |
 | --- | --- | --- |
@@ -92,8 +95,12 @@ cargo clippy --all-targets -- -D warnings
 
 有可用 GPU 时，运行 `cargo test gpu::validation -- --ignored` 检查着色器执行、SDR/HDR 输出、异常值和热重载恢复。
 
+`cargo +stable test --locked -- --include-ignored` 包含新增参考的 420 组独立数值对照，以及全部 17 个 DRT 的 289 种左右对比组合。参考数据生成和来源复现方法见 [验证说明](references/README.md#来源与复现)。
+
 外部测试图可放入已忽略的 `test-assets/`，不随项目分发。
 
 ## 许可
 
 本项目采用 [GNU General Public License v3.0](LICENSE)（`GPL-3.0-only`）。
+
+第三方代码及 LUT 的原始许可/署名记录保留在 [THIRD_PARTY_LICENSES/references/](THIRD_PARTY_LICENSES/references/)；来源和未明确的资产许可状态在各参考条目中独立登记。

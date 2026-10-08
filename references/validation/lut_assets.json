@@ -1,0 +1,57 @@
+{
+  "format_version": 1,
+  "ap0_to_e_gamut": [
+    [
+      1.3242028951644897,
+      -0.23679925501346588,
+      -0.08740367740392685
+    ],
+    [
+      -0.02774209901690483,
+      0.9744444489479065,
+      0.05329766497015953
+    ],
+    [
+      0.10790395736694336,
+      0.03378080576658249,
+      0.8583151698112488
+    ]
+  ],
+  "ap0_to_rec709": [
+    [
+      2.52168607711792,
+      -1.1341309547424316,
+      -0.38755524158477783
+    ],
+    [
+      -0.2764798700809479,
+      1.3727190494537354,
+      -0.0962391272187233
+    ],
+    [
+      -0.015378059819340706,
+      -0.15297536551952362,
+      1.1683534383773804
+    ]
+  ],
+  "assets": [
+    {
+      "id": "blender_agx",
+      "commit": "8b5bd560cf16070d10f361d0a9f00b39436dc379",
+      "source_sha256": "02f4d185608daa67fda01a1a48529bbc1533c8afdc826cde5c78f2eb5bb1b839",
+      "local_source": "third_party/reference_sources/blender/release/datafiles/colormanagement/luts/AgX_Base_sRGB.cube"
+    },
+    {
+      "id": "filmic_gamut",
+      "commit": "84bf836a4d9e130045c962c47ac4206395d4393b",
+      "source_sha256": "7d41c050a4afd394f2d6a09570180a688a1aa3fee1d0b371d1acb1972f2b36ef",
+      "local_source": "third_party/reference_sources/filmic/luts/desat65cube.spi3d"
+    },
+    {
+      "id": "filmic_base_contrast",
+      "commit": "84bf836a4d9e130045c962c47ac4206395d4393b",
+      "source_sha256": "d207e13e9e7349fa760a1276a2da2758d839d4d3e5cf4719095d3d67ceb30c12",
+      "local_source": "third_party/reference_sources/filmic/looks/Filmic_to_0-70_1-03.spi1d"
+    }
+  ]
+}

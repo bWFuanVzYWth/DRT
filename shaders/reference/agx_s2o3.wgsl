@@ -2,7 +2,8 @@
 // AgX-S2O3 reference port by linlin, preserving the original transform structure.
 // This is a port, not the original AgX author's Python implementation.
 // This WGSL version was ported from linlin's GLSL reference port:
-// C:/WorkSpace/AgX/agx.glsl at commit 0796e1b4aa9df94152eff353bae131eae1a4c087.
+// https://github.com/bWFuanVzYWth/AgX/blob/0796e1b4aa9df94152eff353bae131eae1a4c087/agx.glsl
+// Full provenance and retained MIT source notice: references/entries/agx_s2o3.md.
 // Copyright (c) 2024 linlin.
 // Input: scene-linear ACES2065-1 (AP0). Output: display-encoded BT.709/sRGB.
 

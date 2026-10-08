@@ -1,11 +1,15 @@
+mod aces2_data;
 mod comparison;
 #[cfg(test)]
 mod comparison_validation;
 mod distribution;
+mod drt;
 mod file_browser;
 mod gpu;
 mod image_io;
+mod lpm_data;
 mod presenter;
+mod reference;
 mod tone_curve;
 
 use std::{
@@ -413,12 +417,7 @@ impl DrtApp {
                 ui.separator();
                 ui.label(if self.comparison.enabled { "Left DRT" } else { "DRT" });
                 let mut selected_drt = self.gpu.active_drt();
-                ui.horizontal_wrapped(|ui| {
-                    for drt in DrtKind::ALL {
-                        ui.selectable_value(&mut selected_drt, drt, drt.label())
-                            .on_hover_text(drt.description());
-                    }
-                });
+                drt_selector(ui, "left-drt", &mut selected_drt);
                 if selected_drt != self.gpu.active_drt() {
                     match selected_drt {
                         DrtKind::AgxS2O3 => {
@@ -433,7 +432,7 @@ impl DrtApp {
                         DrtKind::RgbReinhard => self
                             .gpu
                             .set_rgb_reinhard_parameters(self.rgb_reinhard_parameters),
-                        DrtKind::None | DrtKind::OklabReinhard => {}
+                        _ => {}
                     }
                     self.gpu.set_drt(selected_drt);
                     self.set_status(format!("Switched to {}", selected_drt.label()), false);
@@ -441,14 +440,7 @@ impl DrtApp {
                 if self.comparison.enabled {
                     ui.horizontal(|ui| {
                         ui.label("Right DRT");
-                        egui::ComboBox::from_id_salt("comparison-right-drt")
-                            .selected_text(self.comparison.right_drt.label())
-                            .show_ui(ui, |ui| {
-                                for drt in DrtKind::ALL {
-                                    ui.selectable_value(&mut self.comparison.right_drt, drt, drt.label())
-                                        .on_hover_text(drt.description());
-                                }
-                            });
+                        drt_selector(ui, "comparison-right-drt", &mut self.comparison.right_drt);
                     });
                     ui.horizontal(|ui| {
                         if ui.button("Swap sides").clicked() {
@@ -466,6 +458,9 @@ impl DrtApp {
                         .small().weak());
                 }
                 self.gpu.set_comparison_drt(self.comparison.enabled.then_some(self.comparison.right_drt));
+                if let Some(source) = self.gpu.active_drt().source_url() {
+                    ui.hyperlink_to("Reference source", source);
+                }
                 ui.separator();
                 if self.comparison.enabled {
                     ui.label(RichText::new("Left DRT curve and parameters").small().weak());
@@ -521,7 +516,7 @@ impl DrtApp {
                         DrtKind::None => "None",
                         DrtKind::RgbLogSigmoid => "RGB Log Sigmoid",
                         DrtKind::RgbReinhard => "RGB Reinhard",
-                        DrtKind::OklabReinhard | DrtKind::OklabLogSigmoid | DrtKind::AgxS2O3 => "HDR target",
+                        _ => "HDR target",
                     };
                     ui.label(
                         RichText::new(format!(
@@ -1223,6 +1218,27 @@ impl DrtApp {
             );
         }
     }
+}
+
+fn drt_selector(ui: &mut egui::Ui, id: &str, selected: &mut DrtKind) {
+    egui::ComboBox::from_id_salt(id)
+        .width(195.0)
+        .selected_text(selected.label())
+        .show_ui(ui, |ui| {
+            ui.selectable_value(selected, DrtKind::None, DrtKind::None.label());
+            ui.separator();
+            ui.label(RichText::new("Third-party references").strong());
+            for kind in DrtKind::REFERENCES {
+                ui.selectable_value(selected, kind, kind.label())
+                    .on_hover_text(kind.description());
+            }
+            ui.separator();
+            ui.label(RichText::new("Research transforms").strong());
+            for kind in DrtKind::RESEARCH {
+                ui.selectable_value(selected, kind, kind.label())
+                    .on_hover_text(kind.description());
+            }
+        });
 }
 
 fn show_image(ui: &mut egui::Ui, texture_id: egui::TextureId, width: u32, height: u32) {

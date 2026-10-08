@@ -27,7 +27,7 @@ impl ProjectionGpu {
         // evaluated by the same functions used by the application's vertex shader.
         let source = format!(
             "{}\n{}",
-            include_str!("../shaders/color_distribution.wgsl"),
+            include_str!("../shaders/analysis/color_distribution.wgsl"),
             r#"
 struct ProjectedPoint {
     position : vec4<f32>,

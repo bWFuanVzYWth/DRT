@@ -11,119 +11,49 @@ use crate::{
     tone_curve::{INPUT_MAX_EV, INPUT_MIN_EV, SAMPLE_COUNT, ToneCurveRenderer},
 };
 
-const BUILT_OKLAB_REINHARD_SHADER: &str = include_str!("../shaders/oklab_reinhard.wgsl");
-const BUILT_OKLAB_LOG_SIGMOID_SHADER: &str = include_str!("../shaders/oklab_log_sigmoid.wgsl");
-const BUILT_AGX_S2O3_SHADER: &str = include_str!("../shaders/agx_s2o3.wgsl");
-const BUILT_RGB_LOG_SIGMOID_SHADER: &str = include_str!("../shaders/rgb_log_sigmoid.wgsl");
-const BUILT_RGB_REINHARD_SHADER: &str = include_str!("../shaders/rgb_reinhard.wgsl");
+const BUILT_OKLAB_REINHARD_SHADER: &str = include_str!("../shaders/research/oklab_reinhard.wgsl");
+const BUILT_OKLAB_LOG_SIGMOID_SHADER: &str =
+    include_str!("../shaders/research/oklab_log_sigmoid.wgsl");
+const BUILT_AGX_S2O3_SHADER: &str = include_str!("../shaders/reference/agx_s2o3.wgsl");
+const BUILT_RGB_LOG_SIGMOID_SHADER: &str = include_str!("../shaders/research/rgb_log_sigmoid.wgsl");
+const BUILT_RGB_REINHARD_SHADER: &str = include_str!("../shaders/research/rgb_reinhard.wgsl");
 pub const DEFAULT_COMPRESSION_START: f32 = 0.18;
 pub const DEFAULT_GAMUT_COMPRESSION: f32 = 0.04;
 
-const BUILT_NONE_SHADER: &str = include_str!("../shaders/none_drt.wgsl");
+const BUILT_NONE_SHADER: &str = include_str!("../shaders/research/none_drt.wgsl");
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DrtKind {
-    None,
-    OklabReinhard,
-    OklabLogSigmoid,
-    AgxS2O3,
-    RgbLogSigmoid,
-    RgbReinhard,
-}
+pub use crate::drt::DrtKind;
 
-impl DrtKind {
-    pub const ALL: [Self; 6] = [
-        Self::None,
-        Self::AgxS2O3,
-        Self::OklabLogSigmoid,
-        Self::OklabReinhard,
-        Self::RgbLogSigmoid,
-        Self::RgbReinhard,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::None => "None",
-            Self::OklabReinhard => "Oklab Reinhard",
-            Self::OklabLogSigmoid => "Oklab Log Sigmoid",
-            Self::AgxS2O3 => "AgX-S2O3",
-            Self::RgbLogSigmoid => "RGB Log Sigmoid",
-            Self::RgbReinhard => "RGB Reinhard",
-        }
-    }
-
-    pub fn description(self) -> &'static str {
-        match self {
-            Self::None => "Display conversion and clipping without tone compression",
-            Self::OklabReinhard => {
-                "Linear segment and Reinhard shoulder in Oklab L^3, with soft chroma compression along a fixed Oklab hue direction"
-            }
-            Self::OklabLogSigmoid => {
-                "Analytic linear shadows and log2 sigmoid shoulder in Oklab L^3, with soft chroma compression along a fixed Oklab hue direction"
-            }
-            Self::AgxS2O3 => {
-                "Reference port by linlin preserving the original AgX-S2O3 structure; not the original author's Python implementation"
-            }
-            Self::RgbLogSigmoid => {
-                "Virtual RGB log2 curve with an exact display-linear neutral segment joined tangentially to a sigmoid shoulder, followed by HSV hue repair"
-            }
-            Self::RgbReinhard => {
-                "Virtual RGB coordinates with a per-channel linear segment and Reinhard shoulder, followed by optional HSV hue repair"
-            }
-        }
-    }
-
-    pub fn shader_file(self) -> &'static str {
-        match self {
-            Self::None => "none_drt.wgsl",
-            Self::OklabReinhard => "oklab_reinhard.wgsl",
-            Self::OklabLogSigmoid => "oklab_log_sigmoid.wgsl",
-            Self::AgxS2O3 => "agx_s2o3.wgsl",
-            Self::RgbLogSigmoid => "rgb_log_sigmoid.wgsl",
-            Self::RgbReinhard => "rgb_reinhard.wgsl",
-        }
-    }
-
-    pub fn index(self) -> usize {
-        match self {
-            Self::None => 0,
-            Self::OklabReinhard => 3,
-            Self::OklabLogSigmoid => 2,
-            Self::AgxS2O3 => 1,
-            Self::RgbLogSigmoid => 4,
-            Self::RgbReinhard => 5,
-        }
-    }
-
-    pub fn uses_linear_log_sigmoid(self) -> bool {
-        matches!(self, Self::RgbLogSigmoid | Self::OklabLogSigmoid)
-    }
-
-    pub fn is_oklab(self) -> bool {
-        matches!(self, Self::OklabReinhard | Self::OklabLogSigmoid)
+pub(crate) fn builtin_shader(kind: DrtKind) -> String {
+    let legacy = match kind {
+        DrtKind::None => Some(BUILT_NONE_SHADER),
+        DrtKind::AgxS2O3 => Some(BUILT_AGX_S2O3_SHADER),
+        DrtKind::OklabReinhard => Some(BUILT_OKLAB_REINHARD_SHADER),
+        DrtKind::OklabLogSigmoid => Some(BUILT_OKLAB_LOG_SIGMOID_SHADER),
+        DrtKind::RgbLogSigmoid => Some(BUILT_RGB_LOG_SIGMOID_SHADER),
+        DrtKind::RgbReinhard => Some(BUILT_RGB_REINHARD_SHADER),
+        _ => None,
+    };
+    if let Some(source) = legacy {
+        source.to_owned()
+    } else {
+        crate::reference::compose(crate::reference::fragment(kind))
     }
 }
 
 struct DrtPipelines {
-    none: wgpu::ComputePipeline,
-    oklab_reinhard: wgpu::ComputePipeline,
-    oklab_log_sigmoid: wgpu::ComputePipeline,
-    agx_s2o3: wgpu::ComputePipeline,
-    rgb_log_sigmoid: wgpu::ComputePipeline,
-    rgb_reinhard: wgpu::ComputePipeline,
+    entries: Vec<wgpu::ComputePipeline>,
 }
 
 impl DrtPipelines {
     fn get(&self, drt: DrtKind) -> &wgpu::ComputePipeline {
-        match drt {
-            DrtKind::None => &self.none,
-            DrtKind::OklabReinhard => &self.oklab_reinhard,
-            DrtKind::OklabLogSigmoid => &self.oklab_log_sigmoid,
-            DrtKind::AgxS2O3 => &self.agx_s2o3,
-            DrtKind::RgbLogSigmoid => &self.rgb_log_sigmoid,
-            DrtKind::RgbReinhard => &self.rgb_reinhard,
-        }
+        &self.entries[drt.index()]
     }
+}
+
+struct ReferenceResources {
+    buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -614,7 +544,7 @@ fn extended_srgb_oetf(linear: f32) -> f32 {
 }
 
 fn direct_output_headroom(drt: DrtKind, headroom: f32) -> f32 {
-    if matches!(drt, DrtKind::None | DrtKind::RgbReinhard) {
+    if drt.supports_hdr() && drt != DrtKind::RgbLogSigmoid {
         headroom
     } else {
         1.0
@@ -656,6 +586,8 @@ struct CurveResources {
 pub struct DrtGpu {
     render_state: egui_wgpu::RenderState,
     bind_group_layout: wgpu::BindGroupLayout,
+    reference_bind_group_layout: wgpu::BindGroupLayout,
+    reference_resources: Vec<ReferenceResources>,
     pipeline_layout: wgpu::PipelineLayout,
     pipelines: DrtPipelines,
     active_drt: DrtKind,
@@ -685,44 +617,29 @@ impl DrtGpu {
         let device = &render_state.device;
         let info = render_state.adapter.get_info();
         let bind_group_layout = create_bind_group_layout(device);
+        let reference_bind_group_layout = create_reference_bind_group_layout(device);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("DRT pipeline layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
+            bind_group_layouts: &[Some(&bind_group_layout), Some(&reference_bind_group_layout)],
             immediate_size: 0,
         });
         let pipelines = DrtPipelines {
-            none: create_pipeline(device, &pipeline_layout, BUILT_NONE_SHADER, "No DRT")?,
-            oklab_reinhard: create_pipeline(
-                device,
-                &pipeline_layout,
-                BUILT_OKLAB_REINHARD_SHADER,
-                "Oklab Reinhard DRT",
-            )?,
-            oklab_log_sigmoid: create_pipeline(
-                device,
-                &pipeline_layout,
-                BUILT_OKLAB_LOG_SIGMOID_SHADER,
-                "Oklab Log Sigmoid DRT",
-            )?,
-            agx_s2o3: create_pipeline(
-                device,
-                &pipeline_layout,
-                BUILT_AGX_S2O3_SHADER,
-                "AgX-S2O3 DRT",
-            )?,
-            rgb_log_sigmoid: create_pipeline(
-                device,
-                &pipeline_layout,
-                BUILT_RGB_LOG_SIGMOID_SHADER,
-                "RGB Log Sigmoid DRT",
-            )?,
-            rgb_reinhard: create_pipeline(
-                device,
-                &pipeline_layout,
-                BUILT_RGB_REINHARD_SHADER,
-                "RGB Reinhard DRT",
-            )?,
+            entries: DrtKind::ALL
+                .into_iter()
+                .map(|kind| {
+                    create_pipeline(
+                        device,
+                        &pipeline_layout,
+                        &builtin_shader(kind),
+                        kind.label(),
+                    )
+                })
+                .collect::<Result<_>>()?,
         };
+        let reference_resources = DrtKind::ALL
+            .into_iter()
+            .map(|kind| create_reference_resources(device, &reference_bind_group_layout, kind, 1.0))
+            .collect();
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("DRT input sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -765,6 +682,8 @@ impl DrtGpu {
         let mut gpu = Self {
             render_state,
             bind_group_layout,
+            reference_bind_group_layout,
+            reference_resources,
             pipeline_layout,
             pipelines,
             active_drt: DrtKind::OklabReinhard,
@@ -882,6 +801,7 @@ impl DrtGpu {
             return;
         }
         self.hdr_headroom = headroom;
+        self.refresh_reference_data();
         self.apply_log_sigmoid_parameters();
         self.apply_reinhard_parameters();
         self.render_state.queue.write_buffer(
@@ -1005,6 +925,11 @@ impl DrtGpu {
     pub fn reload_shader(&mut self, drt: DrtKind, source: &Path) -> Result<()> {
         let shader = std::fs::read_to_string(source)
             .with_context(|| format!("cannot read {}", source.display()))?;
+        let shader = if drt.uses_reference_wrapper() {
+            crate::reference::compose(&shader)
+        } else {
+            shader
+        };
 
         let next = create_pipeline(
             &self.render_state.device,
@@ -1013,15 +938,7 @@ impl DrtGpu {
             drt.label(),
         )
         .with_context(|| format!("cannot reload {}", source.display()))?;
-        match drt {
-            DrtKind::None => self.pipelines.none = next,
-            DrtKind::OklabReinhard => self.pipelines.oklab_reinhard = next,
-
-            DrtKind::OklabLogSigmoid => self.pipelines.oklab_log_sigmoid = next,
-            DrtKind::AgxS2O3 => self.pipelines.agx_s2o3 = next,
-            DrtKind::RgbLogSigmoid => self.pipelines.rgb_log_sigmoid = next,
-            DrtKind::RgbReinhard => self.pipelines.rgb_reinhard = next,
-        }
+        self.pipelines.entries[drt.index()] = next;
         if self.active_drt == drt || self.comparison_drt == Some(drt) {
             self.dispatch();
         }
@@ -1053,7 +970,7 @@ impl DrtGpu {
     }
 
     pub fn active_output_headroom(&self) -> f32 {
-        if self.active_drt == DrtKind::RgbLogSigmoid {
+        if self.active_drt.supports_hdr() {
             self.hdr_headroom
         } else {
             direct_output_headroom(self.active_drt, self.hdr_headroom)
@@ -1121,6 +1038,26 @@ impl DrtGpu {
         parameters
     }
 
+    fn refresh_reference_data(&mut self) {
+        for kind in [DrtKind::Aces20, DrtKind::FidelityFxLpm] {
+            let data = crate::reference::data(kind, self.hdr_headroom);
+            let resources = &mut self.reference_resources[kind.index()];
+            let bytes = bytemuck::cast_slice::<f32, u8>(&data);
+            if resources.buffer.size() == bytes.len() as u64 {
+                self.render_state
+                    .queue
+                    .write_buffer(&resources.buffer, 0, bytes);
+            } else {
+                *resources = create_reference_resources(
+                    &self.render_state.device,
+                    &self.reference_bind_group_layout,
+                    kind,
+                    self.hdr_headroom,
+                );
+            }
+        }
+    }
+
     fn dispatch(&mut self) {
         if let (Some(drt), Some(resources)) = (self.comparison_drt, &self.comparison) {
             self.render_state.queue.write_buffer(
@@ -1148,6 +1085,11 @@ impl DrtGpu {
             });
             pass.set_pipeline(self.pipelines.get(self.active_drt));
             pass.set_bind_group(0, &self.image.bind_group, &[]);
+            pass.set_bind_group(
+                1,
+                &self.reference_resources[self.active_drt.index()].bind_group,
+                &[],
+            );
             pass.dispatch_workgroups(
                 self.image.width.div_ceil(8),
                 self.image.height.div_ceil(8),
@@ -1158,6 +1100,7 @@ impl DrtGpu {
             if let (Some(drt), Some(resources)) = (self.comparison_drt, &self.comparison) {
                 pass.set_pipeline(self.pipelines.get(drt));
                 pass.set_bind_group(0, &resources.bind_group, &[]);
+                pass.set_bind_group(1, &self.reference_resources[drt.index()].bind_group, &[]);
                 pass.dispatch_workgroups(
                     self.image.width.div_ceil(8),
                     self.image.height.div_ceil(8),
@@ -1221,6 +1164,49 @@ fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             },
         ],
     })
+}
+
+pub(crate) fn create_reference_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("reference DRT data bindings"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(16),
+            },
+            count: None,
+        }],
+    })
+}
+
+fn create_reference_resources(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    kind: DrtKind,
+    headroom: f32,
+) -> ReferenceResources {
+    let data = crate::reference::data(kind, headroom);
+    assert!(
+        data.len() >= 4,
+        "reference data must contain at least 16 bytes"
+    );
+    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(kind.label()),
+        contents: bytemuck::cast_slice(&data),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(kind.label()),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: buffer.as_entire_binding(),
+        }],
+    });
+    ReferenceResources { buffer, bind_group }
 }
 
 fn create_pipeline(
@@ -1298,7 +1284,13 @@ fn create_image_resources(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba16Float,
-        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | if cfg!(test) {
+                wgpu::TextureUsages::COPY_SRC
+            } else {
+                wgpu::TextureUsages::empty()
+            },
         view_formats: &[],
     });
     let input_view = input.create_view(&Default::default());
@@ -1539,6 +1531,10 @@ fn create_comparison_resources(
 mod validation;
 
 #[cfg(test)]
+#[path = "reference_validation.rs"]
+mod reference_validation;
+
+#[cfg(test)]
 mod tests {
     use super::{
         DEFAULT_COMPRESSION_START, DEFAULT_GAMUT_COMPRESSION, DrtKind, LinearLogSigmoidParameters,
@@ -1579,15 +1575,12 @@ mod tests {
     #[test]
     fn drt_order_keeps_references_first_and_custom_names_sorted() {
         assert_eq!(
-            DrtKind::ALL.map(DrtKind::label),
-            [
-                "None",
-                "AgX-S2O3",
-                "Oklab Log Sigmoid",
-                "Oklab Reinhard",
-                "RGB Log Sigmoid",
-                "RGB Reinhard",
-            ]
+            DrtKind::ALL[1..1 + DrtKind::REFERENCES.len()],
+            DrtKind::REFERENCES,
+        );
+        assert_eq!(
+            DrtKind::ALL[1 + DrtKind::REFERENCES.len()..],
+            DrtKind::RESEARCH
         );
         for (index, drt) in DrtKind::ALL.into_iter().enumerate() {
             assert_eq!(drt.index(), index);
@@ -1850,6 +1843,14 @@ mod tests {
         assert_eq!(direct_output_headroom(DrtKind::OklabReinhard, 4.0), 1.0);
         assert_eq!(direct_output_headroom(DrtKind::AgxS2O3, 4.0), 1.0);
         assert_eq!(direct_output_headroom(DrtKind::RgbLogSigmoid, 4.0), 1.0);
+        for kind in DrtKind::REFERENCES {
+            assert_eq!(
+                direct_output_headroom(kind, 4.0),
+                if kind.supports_hdr() { 4.0 } else { 1.0 },
+                "{}",
+                kind.label(),
+            );
+        }
 
         let encoded_peak = extended_srgb_oetf(direct_output_headroom(DrtKind::None, 4.0));
         assert!(encoded_peak > 1.0);

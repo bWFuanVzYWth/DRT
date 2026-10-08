@@ -231,7 +231,7 @@ impl DistributionResources {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("color distribution shader"),
             source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/color_distribution.wgsl").into(),
+                include_str!("../shaders/analysis/color_distribution.wgsl").into(),
             ),
         });
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

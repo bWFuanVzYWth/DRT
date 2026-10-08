@@ -7,6 +7,8 @@ struct TestGpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     bindings: wgpu::BindGroupLayout,
+    reference_bindings: wgpu::BindGroupLayout,
+    default_reference: ReferenceResources,
     layout: wgpu::PipelineLayout,
 }
 
@@ -20,9 +22,12 @@ impl TestGpu {
         let (device, queue) =
             pollster::block_on(adapter.request_device(&Default::default())).unwrap();
         let bindings = create_bind_group_layout(&device);
+        let reference_bindings = create_reference_bind_group_layout(&device);
+        let default_reference =
+            create_reference_resources(&device, &reference_bindings, DrtKind::None, 1.0);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("DRT validation layout"),
-            bind_group_layouts: &[Some(&bindings)],
+            bind_group_layouts: &[Some(&bindings), Some(&reference_bindings)],
             immediate_size: 0,
         });
         Self {
@@ -31,6 +36,8 @@ impl TestGpu {
             device,
             queue,
             bindings,
+            reference_bindings,
+            default_reference,
             layout,
         }
     }
@@ -97,6 +104,34 @@ impl TestGpu {
         pipeline: &wgpu::ComputePipeline,
         parameters: Parameters,
         input: &[f32],
+    ) -> Vec<f32> {
+        self.render_with_reference(
+            pipeline,
+            parameters,
+            input,
+            &self.default_reference.bind_group,
+        )
+    }
+
+    fn render_kind(
+        &self,
+        pipeline: &wgpu::ComputePipeline,
+        parameters: Parameters,
+        input: &[f32],
+        kind: DrtKind,
+        headroom: f32,
+    ) -> Vec<f32> {
+        let resources =
+            create_reference_resources(&self.device, &self.reference_bindings, kind, headroom);
+        self.render_with_reference(pipeline, parameters, input, &resources.bind_group)
+    }
+
+    fn render_with_reference(
+        &self,
+        pipeline: &wgpu::ComputePipeline,
+        parameters: Parameters,
+        input: &[f32],
+        reference: &wgpu::BindGroup,
     ) -> Vec<f32> {
         let extent = wgpu::Extent3d {
             width: parameters.width,
@@ -178,6 +213,7 @@ impl TestGpu {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &group, &[]);
+            pass.set_bind_group(1, reference, &[]);
             pass.dispatch_workgroups(extent.width.div_ceil(8), extent.height.div_ceil(8), 1);
         }
         encoder.copy_texture_to_buffer(
@@ -267,7 +303,12 @@ fn drt_gpu_comparison_uses_independent_curves_and_refreshes() {
             // Selecting the right DRT as the regular output provides an
             // independent reference for its saved parameters and HDR behavior.
             drt.set_drt(right);
-            let expected = gpu.render(drt.pipelines.get(right), drt.parameters, &image.rgba);
+            let expected = gpu.render_with_reference(
+                drt.pipelines.get(right),
+                drt.parameters,
+                &image.rgba,
+                &drt.reference_resources[right.index()].bind_group,
+            );
             assert_eq!(comparison, expected, "{} / {}", left.label(), right.label());
             drt.set_drt(left);
         }
@@ -374,16 +415,9 @@ fn drt_gpu_comparison_uses_independent_curves_and_refreshes() {
 fn drt_gpu_outputs() {
     let gpu = TestGpu::new();
     let image = crate::image_io::test_pattern(63, 9);
-    let shaders: [&str; DrtKind::ALL.len()] = [
-        BUILT_NONE_SHADER,
-        BUILT_AGX_S2O3_SHADER,
-        BUILT_OKLAB_LOG_SIGMOID_SHADER,
-        BUILT_OKLAB_REINHARD_SHADER,
-        BUILT_RGB_LOG_SIGMOID_SHADER,
-        BUILT_RGB_REINHARD_SHADER,
-    ];
+    let shaders = DrtKind::ALL.map(builtin_shader);
     for (drt, shader) in DrtKind::ALL.into_iter().zip(shaders) {
-        let pipeline = create_pipeline(&gpu.device, &gpu.layout, shader, drt.label()).unwrap();
+        let pipeline = create_pipeline(&gpu.device, &gpu.layout, &shader, drt.label()).unwrap();
         for variant in 0..6 {
             let mut parameters = Parameters::new(image.width, image.height);
             let headroom = [1.0, 4.0, 64.0][variant % 3];
@@ -416,13 +450,12 @@ fn drt_gpu_outputs() {
             } else {
                 parameters.set_log_sigmoid(LogSigmoidParameters::default());
             }
-            let pixels = gpu.render(&pipeline, parameters, &image.rgba);
+            let pixels = gpu.render_kind(&pipeline, parameters, &image.rgba, drt, headroom);
             assert!(pixels.iter().all(|v| v.is_finite() && *v >= 0.0));
             assert!(pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 1.0));
             let peak = match drt {
-                DrtKind::None | DrtKind::RgbReinhard => extended_srgb_oetf(headroom),
                 DrtKind::RgbLogSigmoid => parameters.log_sigmoid_output_peak,
-                _ => 1.0,
+                _ => extended_srgb_oetf(direct_output_headroom(drt, headroom)),
             };
             assert!(
                 pixels
@@ -431,11 +464,25 @@ fn drt_gpu_outputs() {
                     .iter()
                     .all(|p| p[..3].iter().all(|v| *v <= peak + 0.005))
             );
-            // The first row is a neutral ramp. It must stay neutral and monotonic.
+            // The first row is a neutral ramp. LPM's nonuniform crosstalk and
+            // per-channel highlight clipping can color the brightest neutral
+            // samples; its independent upstream fixtures verify that behavior.
             let ramp = &pixels[..image.width as usize * 4];
-            for pixel in ramp.as_chunks::<4>().0 {
-                assert!((pixel[0] - pixel[1]).abs() < 0.003 * peak);
-                assert!((pixel[1] - pixel[2]).abs() < 0.003 * peak);
+            if drt != DrtKind::FidelityFxLpm {
+                for pixel in ramp.as_chunks::<4>().0 {
+                    assert!(
+                        (pixel[0] - pixel[1]).abs() < 0.003 * peak,
+                        "{} headroom {headroom}: neutral ramp {:?}",
+                        drt.label(),
+                        pixel
+                    );
+                    assert!(
+                        (pixel[1] - pixel[2]).abs() < 0.003 * peak,
+                        "{} headroom {headroom}: neutral ramp {:?}",
+                        drt.label(),
+                        pixel
+                    );
+                }
             }
             if drt == DrtKind::OklabReinhard {
                 // Oklab Reinhard applies its independent curve in L^3.
@@ -468,12 +515,7 @@ fn drt_gpu_outputs() {
                     .windows(2)
                     .all(|pair| pair[1] + 0.0001 >= pair[0])
             );
-            if headroom > 1.0
-                && matches!(
-                    drt,
-                    DrtKind::None | DrtKind::RgbLogSigmoid | DrtKind::RgbReinhard
-                )
-            {
+            if headroom > 1.0 && drt.supports_hdr() {
                 assert!(
                     ramp.iter().any(|v| *v > 1.0),
                     "{} lost HDR headroom",
@@ -488,16 +530,9 @@ fn drt_gpu_outputs() {
 #[ignore = "requires a GPU; run with --ignored --nocapture"]
 fn drt_gpu_diagnostics() {
     let gpu = TestGpu::new();
-    let shaders: [&str; DrtKind::ALL.len()] = [
-        BUILT_NONE_SHADER,
-        BUILT_AGX_S2O3_SHADER,
-        BUILT_OKLAB_LOG_SIGMOID_SHADER,
-        BUILT_OKLAB_REINHARD_SHADER,
-        BUILT_RGB_LOG_SIGMOID_SHADER,
-        BUILT_RGB_REINHARD_SHADER,
-    ];
+    let shaders = DrtKind::ALL.map(builtin_shader);
     for (drt, shader) in DrtKind::ALL.into_iter().zip(shaders) {
-        let pipeline = create_pipeline(&gpu.device, &gpu.layout, shader, drt.label()).unwrap();
+        let pipeline = create_pipeline(&gpu.device, &gpu.layout, &shader, drt.label()).unwrap();
         let mut pixels = Vec::new();
         for show_anomalies in [0, 1] {
             for rgb in [
@@ -517,7 +552,13 @@ fn drt_gpu_diagnostics() {
                     );
                 }
                 parameters.show_anomalies = show_anomalies;
-                pixels.extend(gpu.render(&pipeline, parameters, &[rgb[0], rgb[1], rgb[2], 1.0]));
+                pixels.extend(gpu.render_kind(
+                    &pipeline,
+                    parameters,
+                    &[rgb[0], rgb[1], rgb[2], 1.0],
+                    drt,
+                    1.0,
+                ));
             }
         }
         let expected_special = [
@@ -535,7 +576,14 @@ fn drt_gpu_diagnostics() {
                 assert_color(&pixels[offset..offset + 4], color);
             }
         }
-        assert_color(&pixels[..4], [0.0; 3]);
+        // OpenDRT Standard's published softplus toe lifts absolute black.
+        // Its upstream executable oracle gives this display-linear value.
+        let reference_black = if drt == DrtKind::OpenDrt {
+            extended_srgb_oetf(9.832_553e-5)
+        } else {
+            0.0
+        };
+        assert_color(&pixels[..4], [reference_black; 3]);
         if drt == DrtKind::None {
             assert_color(&pixels[8 * 4..9 * 4], [0.0, 0.25, 1.0]);
             assert_color(&pixels[9 * 4..10 * 4], [1.0, 0.05, 0.0]);
@@ -993,7 +1041,7 @@ fn drt_gpu_hot_reload_recovers() {
     drt.set_oklab_log_sigmoid_parameters(oklab_sigmoid);
     drt.set_drt(DrtKind::OklabLogSigmoid);
     let oklab_sigmoid_output = gpu.render(
-        &drt.pipelines.oklab_log_sigmoid,
+        drt.pipelines.get(DrtKind::OklabLogSigmoid),
         drt.parameters,
         &image.rgba,
     );
@@ -1015,10 +1063,7 @@ fn drt_gpu_hot_reload_recovers() {
         for kind in DrtKind::ALL {
             drt.set_drt(kind);
             drt.set_hdr_headroom(headroom);
-            let expected_range = match kind {
-                DrtKind::None | DrtKind::RgbLogSigmoid | DrtKind::RgbReinhard => headroom,
-                DrtKind::AgxS2O3 | DrtKind::OklabReinhard | DrtKind::OklabLogSigmoid => 1.0,
-            };
+            let expected_range = if kind.supports_hdr() { headroom } else { 1.0 };
             assert_eq!(drt.active_output_headroom(), expected_range);
         }
         drt.set_drt(DrtKind::OklabLogSigmoid);
@@ -1031,7 +1076,7 @@ fn drt_gpu_hot_reload_recovers() {
         assert_eq!(drt.parameters.log_sigmoid_output_peak, 1.0);
         assert_eq!(
             gpu.render(
-                &drt.pipelines.oklab_log_sigmoid,
+                drt.pipelines.get(DrtKind::OklabLogSigmoid),
                 drt.parameters,
                 &image.rgba
             ),
@@ -1049,14 +1094,14 @@ fn drt_gpu_hot_reload_recovers() {
     drt.set_drt(DrtKind::RgbReinhard);
     let input = [0.18, 0.18, 0.18, 1.0];
     let parameters = Parameters::new(1, 1);
-    let original = gpu.render(&drt.pipelines.rgb_reinhard, parameters, &input);
+    let original = gpu.render(drt.pipelines.get(DrtKind::RgbReinhard), parameters, &input);
     let file = std::env::temp_dir().join(format!("drt-reload-test-{}.wgsl", std::process::id()));
     std::fs::write(&file, "invalid WGSL").unwrap();
     let error = drt.reload_shader(DrtKind::RgbReinhard, &file).unwrap_err();
     assert!(format!("{error:#}").contains("parsing error"));
     assert_eq!(
         original,
-        gpu.render(&drt.pipelines.rgb_reinhard, parameters, &input)
+        gpu.render(drt.pipelines.get(DrtKind::RgbReinhard), parameters, &input)
     );
     // A valid edit must actually replace the pipeline after a failed edit.
     std::fs::write(
@@ -1074,7 +1119,7 @@ fn drt_gpu_hot_reload_recovers() {
     .unwrap();
     drt.reload_shader(DrtKind::RgbReinhard, &file).unwrap();
     assert_color(
-        &gpu.render(&drt.pipelines.rgb_reinhard, parameters, &input),
+        &gpu.render(drt.pipelines.get(DrtKind::RgbReinhard), parameters, &input),
         [0.25, 0.5, 0.75],
     );
     std::fs::remove_file(&file).unwrap();

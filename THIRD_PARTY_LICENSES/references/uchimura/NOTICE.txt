@@ -1,0 +1,15 @@
+Uchimura / Gran Turismo tone curve mathematical reference
+Algorithm author: Hajime Uchimura, Polyphony Digital Inc.
+Course coauthor: Kentaro Suzuki.
+
+Official course: https://www.polyphony.co.jp/publications/sa2018/
+Official PDF:
+https://cdn2.gran-turismo.com/data/www/pdi_publications/PracticalHDRandWCGinGTS_20181222.pdf
+Author graph linked in official PDF page 124:
+https://www.desmos.com/calculator/mbkwnuihbd
+
+The WGSL implementation independently expresses the published mathematical
+formula and is licensed GPL-3.0-only under this project's license. Original
+course slides, text and source snippets are not redistributed with the port.
+No separate open-source license is asserted for the source course material.
+See references/entries/uchimura.md for pinned hashes and adapter details.
