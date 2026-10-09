@@ -517,7 +517,11 @@ impl DrtApp {
                 if self.comparison.enabled {
                     ui.label(RichText::new("Left DRT curve and parameters").small().weak());
                 }
-                ToneCurveRenderer::paint(ui, self.gpu.active_drt().label());
+                ToneCurveRenderer::paint(
+                    ui,
+                    self.gpu.active_drt().label(),
+                    self.gpu.active_output_headroom(),
+                );
                 ui.separator();
                 ui.label(RichText::new("Display range").strong());
                 if self.display_output.hdr_surface {

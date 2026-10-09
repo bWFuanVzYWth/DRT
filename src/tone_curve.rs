@@ -5,15 +5,14 @@ use wgpu::util::DeviceExt;
 pub const SAMPLE_COUNT: u32 = 512;
 pub const INPUT_MIN_EV: f32 = -16.0;
 pub const INPUT_MAX_EV: f32 = 18.0;
-const OUTPUT_MIN_EV: f32 = -12.0;
-const OUTPUT_MAX_EV: f32 = 10.0;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct PlotParameters {
     sample_count: u32,
     target_is_srgb: u32,
-    _padding: [u32; 2],
+    output_peak: f32,
+    _padding: u32,
 }
 
 pub struct ToneCurveRenderer;
@@ -28,8 +27,11 @@ impl ToneCurveRenderer {
         ));
     }
 
-    pub fn paint(ui: &mut egui::Ui, drt_label: &str) -> egui::Response {
-        ui.label(egui::RichText::new("Neutral-axis tone curve · log₂ EV").strong());
+    pub fn paint(ui: &mut egui::Ui, drt_label: &str, linear_output_peak: f32) -> egui::Response {
+        let linear_output_peak = valid_output_peak(linear_output_peak);
+        ui.label(
+            egui::RichText::new("Neutral-axis tone curve · log input / linear output").strong(),
+        );
         ui.horizontal(|ui| {
             legend(ui, egui::Color32::from_gray(215), drt_label);
             legend(ui, egui::Color32::from_rgb(83, 139, 155), "Linear");
@@ -47,7 +49,7 @@ impl ToneCurveRenderer {
         );
 
         let plot = egui::Rect::from_min_max(
-            outer.min + egui::vec2(28.0, 19.0),
+            outer.min + egui::vec2(38.0, 19.0),
             outer.max - egui::vec2(7.0, 23.0),
         );
         let grid = egui::Color32::from_gray(42);
@@ -69,8 +71,9 @@ impl ToneCurveRenderer {
                 text,
             );
         }
-        for value in [-12.0, -6.0, 0.0, 6.0, 10.0] {
-            let y = map_y(plot, value);
+        for fraction in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let value = fraction * linear_output_peak;
+            let y = map_y(plot, value, linear_output_peak);
             painter.line_segment(
                 [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
                 egui::Stroke::new(1.0, if value == 0.0 { axis } else { grid }),
@@ -78,25 +81,21 @@ impl ToneCurveRenderer {
             painter.text(
                 egui::pos2(plot.left() - 4.0, y),
                 egui::Align2::RIGHT_CENTER,
-                format_ev(value),
+                format_linear_output(value),
                 font.clone(),
                 text,
             );
         }
 
-        // Untonemapped display-linear light is y=x in the same log2/EV axes.
-        let identity_start = INPUT_MIN_EV.max(OUTPUT_MIN_EV);
-        let identity_end = INPUT_MAX_EV.min(OUTPUT_MAX_EV);
-        painter.line_segment(
-            [
-                egui::pos2(map_x(plot, identity_start), map_y(plot, identity_start)),
-                egui::pos2(map_x(plot, identity_end), map_y(plot, identity_end)),
-            ],
+        // Logarithmic input makes untonemapped linear light exponential on this plot.
+        // Stop at the true peak crossing instead of drawing a clamped plateau.
+        painter.add(egui::Shape::line(
+            identity_points(plot, linear_output_peak),
             egui::Stroke::new(1.25, egui::Color32::from_rgb(83, 139, 155)),
-        );
+        ));
         painter.add(egui_wgpu::Callback::new_paint_callback(
             plot,
-            ToneCurveCallback,
+            ToneCurveCallback { linear_output_peak },
         ));
         painter.text(
             egui::pos2(plot.center().x, outer.bottom() - 2.0),
@@ -108,12 +107,12 @@ impl ToneCurveRenderer {
         painter.text(
             egui::pos2(plot.left(), outer.top() + 3.0),
             egui::Align2::LEFT_TOP,
-            "output EV rel. 18%",
+            "linear output / SDR white",
             font,
             text,
         );
         response.on_hover_text(
-            "Both axes are log2 stops relative to 18% gray. The DRT curve uses a synthetic neutral AP0 axis and is independent of the loaded image.",
+            "Input is logarithmic: log2 stops relative to 18% gray. Output is display-linear light in SDR-white units, from exact black to the active DRT's current display peak. The linear reference stops where it reaches that peak. The DRT curve uses a synthetic neutral AP0 axis and is independent of the loaded image and exposure.",
         )
     }
 }
@@ -131,9 +130,36 @@ fn map_x(rect: egui::Rect, ev: f32) -> f32 {
     egui::remap(ev, INPUT_MIN_EV..=INPUT_MAX_EV, rect.x_range())
 }
 
-fn map_y(rect: egui::Rect, ev: f32) -> f32 {
-    let t = (ev - OUTPUT_MIN_EV) / (OUTPUT_MAX_EV - OUTPUT_MIN_EV);
-    egui::lerp(rect.bottom()..=rect.top(), t)
+fn map_y(rect: egui::Rect, linear_output: f32, output_peak: f32) -> f32 {
+    let t = (linear_output / output_peak).clamp(0.0, 1.0);
+    rect.bottom() - rect.height() * t
+}
+
+fn valid_output_peak(output_peak: f32) -> f32 {
+    if output_peak.is_finite() {
+        output_peak.max(1.0)
+    } else {
+        1.0
+    }
+}
+
+fn identity_points(rect: egui::Rect, output_peak: f32) -> Vec<egui::Pos2> {
+    let last_ev = (output_peak / 0.18).log2().min(INPUT_MAX_EV);
+    (0..SAMPLE_COUNT)
+        .map(|index| {
+            let t = index as f32 / (SAMPLE_COUNT - 1) as f32;
+            let ev = egui::lerp(INPUT_MIN_EV..=last_ev, t);
+            let linear_output = 0.18 * ev.exp2();
+            egui::pos2(map_x(rect, ev), map_y(rect, linear_output, output_peak))
+        })
+        .collect()
+}
+
+fn format_linear_output(value: f32) -> String {
+    format!("{value:.2}")
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_owned()
 }
 
 fn format_ev(value: f32) -> String {
@@ -144,9 +170,31 @@ fn format_ev(value: f32) -> String {
     }
 }
 
-struct ToneCurveCallback;
+struct ToneCurveCallback {
+    linear_output_peak: f32,
+}
 
 impl egui_wgpu::CallbackTrait for ToneCurveCallback {
+    fn prepare(
+        &self,
+        _device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        _screen: &egui_wgpu::ScreenDescriptor,
+        _encoder: &mut wgpu::CommandEncoder,
+        resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let resources: &ToneCurveResources =
+            resources.get().expect("tone-curve renderer was installed");
+        let parameters = PlotParameters {
+            sample_count: SAMPLE_COUNT,
+            target_is_srgb: resources.target_is_srgb,
+            output_peak: self.linear_output_peak,
+            _padding: 0,
+        };
+        queue.write_buffer(&resources.uniform, 0, bytemuck::bytes_of(&parameters));
+        Vec::new()
+    }
+
     fn paint(
         &self,
         _info: egui::PaintCallbackInfo,
@@ -164,6 +212,8 @@ impl egui_wgpu::CallbackTrait for ToneCurveCallback {
 struct ToneCurveResources {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
+    uniform: wgpu::Buffer,
+    target_is_srgb: u32,
 }
 
 impl ToneCurveResources {
@@ -208,12 +258,13 @@ impl ToneCurveResources {
         let parameters = PlotParameters {
             sample_count: SAMPLE_COUNT,
             target_is_srgb: u32::from(target_format.is_srgb()),
-            _padding: [0; 2],
+            output_peak: 1.0,
+            _padding: 0,
         };
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("neutral-axis tone-curve plot parameters"),
             contents: bytemuck::bytes_of(&parameters),
-            usage: wgpu::BufferUsages::UNIFORM,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("neutral-axis tone-curve bind group"),
@@ -267,6 +318,11 @@ impl ToneCurveResources {
         Self {
             pipeline,
             bind_group,
+            uniform,
+            target_is_srgb: parameters.target_is_srgb,
         }
     }
 }
+
+#[cfg(test)]
+include!("tone_curve_validation.rs");
