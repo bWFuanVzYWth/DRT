@@ -454,6 +454,15 @@ fn drt_gpu_outputs() {
                 }
                 parameters.set_oklab_aces_for_headroom(source, headroom);
             }
+            if drt == DrtKind::OklabNeutral {
+                let mut source = OklabNeutralParameters::default();
+                if variant >= 3 {
+                    source.linear_slope = 1.5;
+                    source.compression_start = 0.4;
+                    source.set_highlight_reach_ev(14.0, headroom);
+                }
+                parameters.set_oklab_neutral_for_headroom(source, headroom);
+            }
             if drt.uses_linear_log_sigmoid() {
                 parameters.set_linear_log_sigmoid_for_headroom(
                     sigmoid,
@@ -1146,3 +1155,4 @@ fn drt_gpu_hot_reload_recovers() {
 }
 
 include!("oklab_aces_validation.rs");
+include!("oklab_neutral_validation.rs");

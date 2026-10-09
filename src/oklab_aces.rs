@@ -1,5 +1,5 @@
 //! An original Oklab experiment inspired by ACES 2's perceptual tone stage.
-//! No ACES coefficients, white adaptation, or target-gamut boundary mapping.
+//! Defines the independent tone curve; fixed-hue gamut protection lives in WGSL.
 
 pub const DEFAULT_HIGHLIGHT_REACH_EV: f32 = 10.0;
 const MIN_SHOULDER_POWER: f32 = 0.25;

@@ -15,6 +15,7 @@ const BUILT_OKLAB_REINHARD_SHADER: &str = include_str!("../shaders/research/okla
 const BUILT_OKLAB_LOG_SIGMOID_SHADER: &str =
     include_str!("../shaders/research/oklab_log_sigmoid.wgsl");
 const BUILT_OKLAB_ACES_SHADER: &str = include_str!("../shaders/research/oklab_aces.wgsl");
+const BUILT_OKLAB_NEUTRAL_SHADER: &str = include_str!("../shaders/research/oklab_neutral.wgsl");
 const BUILT_AGX_S2O3_SHADER: &str = include_str!("../shaders/reference/agx_s2o3.wgsl");
 const BUILT_RGB_LOG_SIGMOID_SHADER: &str = include_str!("../shaders/research/rgb_log_sigmoid.wgsl");
 const BUILT_RGB_REINHARD_SHADER: &str = include_str!("../shaders/research/rgb_reinhard.wgsl");
@@ -25,6 +26,7 @@ const BUILT_NONE_SHADER: &str = include_str!("../shaders/research/none_drt.wgsl"
 
 pub use crate::drt::DrtKind;
 pub use crate::oklab_aces::OklabAcesParameters;
+pub use crate::oklab_neutral::OklabNeutralParameters;
 
 pub(crate) fn builtin_shader(kind: DrtKind) -> String {
     let legacy = match kind {
@@ -33,6 +35,7 @@ pub(crate) fn builtin_shader(kind: DrtKind) -> String {
         DrtKind::OklabReinhard => Some(BUILT_OKLAB_REINHARD_SHADER),
         DrtKind::OklabLogSigmoid => Some(BUILT_OKLAB_LOG_SIGMOID_SHADER),
         DrtKind::OklabAces => Some(BUILT_OKLAB_ACES_SHADER),
+        DrtKind::OklabNeutral => Some(BUILT_OKLAB_NEUTRAL_SHADER),
         DrtKind::RgbLogSigmoid => Some(BUILT_RGB_LOG_SIGMOID_SHADER),
         DrtKind::RgbReinhard => Some(BUILT_RGB_REINHARD_SHADER),
         _ => None,
@@ -401,6 +404,9 @@ struct Parameters {
     oklab_aces_linear_slope: f32,
     oklab_aces_compression_start: f32,
     oklab_aces_shoulder_power: f32,
+    oklab_neutral_linear_slope: f32,
+    oklab_neutral_compression_start: f32,
+    oklab_neutral_shoulder_power: f32,
 }
 
 impl Parameters {
@@ -436,8 +442,12 @@ impl Parameters {
             oklab_aces_linear_slope: 0.0,
             oklab_aces_compression_start: 0.0,
             oklab_aces_shoulder_power: 0.0,
+            oklab_neutral_linear_slope: 0.0,
+            oklab_neutral_compression_start: 0.0,
+            oklab_neutral_shoulder_power: 0.0,
         };
         parameters.set_oklab_aces_for_headroom(OklabAcesParameters::default(), 1.0);
+        parameters.set_oklab_neutral_for_headroom(OklabNeutralParameters::default(), 1.0);
         parameters.set_oklab_chroma(OklabChromaParameters::default());
         parameters.set_log_sigmoid(LogSigmoidParameters::default());
         parameters.set_reinhard_for_headroom(ReinhardParameters::default(), 1.0);
@@ -450,6 +460,19 @@ impl Parameters {
         self.oklab_aces_linear_slope = curve.linear_slope;
         self.oklab_aces_compression_start = curve.compression_start;
         self.oklab_aces_shoulder_power = curve.shoulder_power;
+        self.linear_output_peak = curve.output_peak;
+    }
+
+    fn set_oklab_neutral_for_headroom(
+        &mut self,
+        mut source: OklabNeutralParameters,
+        headroom: f32,
+    ) {
+        source.constrain();
+        let curve = source.curve_for_headroom(headroom);
+        self.oklab_neutral_linear_slope = curve.linear_slope;
+        self.oklab_neutral_compression_start = curve.compression_start;
+        self.oklab_neutral_shoulder_power = curve.shoulder_power;
         self.linear_output_peak = curve.output_peak;
     }
 
@@ -622,6 +645,7 @@ pub struct DrtGpu {
     rgb_log_sigmoid_parameters: LinearLogSigmoidParameters,
     oklab_log_sigmoid_parameters: LinearLogSigmoidParameters,
     oklab_aces_parameters: OklabAcesParameters,
+    oklab_neutral_parameters: OklabNeutralParameters,
     oklab_reinhard_parameters: ReinhardParameters,
     oklab_reinhard_chroma: OklabChromaParameters,
     oklab_log_sigmoid_chroma: OklabChromaParameters,
@@ -719,6 +743,7 @@ impl DrtGpu {
             rgb_log_sigmoid_parameters: LinearLogSigmoidParameters::default(),
             oklab_log_sigmoid_parameters: LinearLogSigmoidParameters::default(),
             oklab_aces_parameters: OklabAcesParameters::default(),
+            oklab_neutral_parameters: OklabNeutralParameters::default(),
             oklab_reinhard_parameters: ReinhardParameters::oklab_default(),
             oklab_reinhard_chroma: OklabChromaParameters::default(),
             oklab_log_sigmoid_chroma: OklabChromaParameters::default(),
@@ -820,6 +845,18 @@ impl DrtGpu {
         source.constrain();
         self.oklab_aces_parameters = source;
         self.apply_oklab_aces_parameters();
+        self.render_state.queue.write_buffer(
+            &self.uniform,
+            0,
+            bytemuck::bytes_of(&self.parameters),
+        );
+        self.dispatch();
+    }
+
+    pub fn set_oklab_neutral_parameters(&mut self, mut source: OklabNeutralParameters) {
+        source.constrain();
+        self.oklab_neutral_parameters = source;
+        self.apply_oklab_neutral_parameters();
         self.render_state.queue.write_buffer(
             &self.uniform,
             0,
@@ -1042,12 +1079,20 @@ impl DrtGpu {
             self.hdr_headroom,
         );
         self.apply_oklab_aces_parameters();
+        self.apply_oklab_neutral_parameters();
     }
 
     fn apply_oklab_aces_parameters(&mut self) {
         if self.active_drt == DrtKind::OklabAces {
             self.parameters
                 .set_oklab_aces_for_headroom(self.oklab_aces_parameters, self.hdr_headroom);
+        }
+    }
+
+    fn apply_oklab_neutral_parameters(&mut self) {
+        if self.active_drt == DrtKind::OklabNeutral {
+            self.parameters
+                .set_oklab_neutral_for_headroom(self.oklab_neutral_parameters, self.hdr_headroom);
         }
     }
 
@@ -1078,6 +1123,10 @@ impl DrtGpu {
         );
         if drt == DrtKind::OklabAces {
             parameters.set_oklab_aces_for_headroom(self.oklab_aces_parameters, self.hdr_headroom);
+        }
+        if drt == DrtKind::OklabNeutral {
+            parameters
+                .set_oklab_neutral_for_headroom(self.oklab_neutral_parameters, self.hdr_headroom);
         }
         parameters
     }
@@ -1824,7 +1873,7 @@ mod tests {
         assert_eq!(parameters.rgb_hue_retention, 0.5);
         assert_eq!(parameters.linear_curve_peak, curve.curve_peak);
         assert!(curve.curve_peak > 1.0 && curve.curve_peak < 1.01);
-        assert_eq!(std::mem::size_of::<Parameters>(), 120);
+        assert_eq!(std::mem::size_of::<Parameters>(), 132);
     }
 
     #[test]

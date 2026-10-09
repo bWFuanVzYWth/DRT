@@ -16,6 +16,7 @@ pub enum DrtKind {
     OklabLogSigmoid,
     OklabReinhard,
     OklabAces,
+    OklabNeutral,
     RgbLogSigmoid,
     RgbReinhard,
 }
@@ -35,14 +36,15 @@ impl DrtKind {
         Self::Uchimura,
         Self::AcesFitted,
     ];
-    pub const RESEARCH: [Self; 5] = [
+    pub const RESEARCH: [Self; 6] = [
         Self::OklabLogSigmoid,
         Self::OklabReinhard,
         Self::OklabAces,
+        Self::OklabNeutral,
         Self::RgbLogSigmoid,
         Self::RgbReinhard,
     ];
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::None,
         Self::AgxS2O3,
         Self::Aces13,
@@ -59,6 +61,7 @@ impl DrtKind {
         Self::OklabLogSigmoid,
         Self::OklabReinhard,
         Self::OklabAces,
+        Self::OklabNeutral,
         Self::RgbLogSigmoid,
         Self::RgbReinhard,
     ];
@@ -81,6 +84,7 @@ impl DrtKind {
             Self::OklabLogSigmoid => "Oklab Log Sigmoid",
             Self::OklabReinhard => "Oklab Reinhard",
             Self::OklabAces => "Oklab ACES-inspired",
+            Self::OklabNeutral => "Oklab Neutral",
             Self::RgbLogSigmoid => "RGB Log Sigmoid",
             Self::RgbReinhard => "RGB Reinhard",
         }
@@ -130,7 +134,10 @@ impl DrtKind {
                 "Linear segment and Reinhard shoulder in Oklab L^3 with chroma compression"
             }
             Self::OklabAces => {
-                "Experimental ACES-inspired Oklab: linear shadows, adjustable highlight reach and proportional chroma scaling; SDR/HDR"
+                "Experimental ACES-inspired shoulder with fixed Oklab hue and saturation detail near white; linear tone shadows and SDR/HDR"
+            }
+            Self::OklabNeutral => {
+                "Experimental max-RGB shoulder and root-LMS white path; linear Rec.709 shadows and SDR/HDR"
             }
             Self::RgbLogSigmoid => {
                 "Research RGB log2 sigmoid with exact linear shadows and HSV hue repair"
@@ -159,6 +166,7 @@ impl DrtKind {
             Self::OklabLogSigmoid => "research/oklab_log_sigmoid.wgsl",
             Self::OklabReinhard => "research/oklab_reinhard.wgsl",
             Self::OklabAces => "research/oklab_aces.wgsl",
+            Self::OklabNeutral => "research/oklab_neutral.wgsl",
             Self::RgbLogSigmoid => "research/rgb_log_sigmoid.wgsl",
             Self::RgbReinhard => "research/rgb_reinhard.wgsl",
         }
@@ -183,7 +191,7 @@ impl DrtKind {
     pub fn is_oklab(self) -> bool {
         matches!(
             self,
-            Self::OklabReinhard | Self::OklabLogSigmoid | Self::OklabAces
+            Self::OklabReinhard | Self::OklabLogSigmoid | Self::OklabAces | Self::OklabNeutral
         )
     }
     pub fn supports_hdr(self) -> bool {
@@ -193,6 +201,7 @@ impl DrtKind {
                 | Self::RgbReinhard
                 | Self::RgbLogSigmoid
                 | Self::OklabAces
+                | Self::OklabNeutral
                 | Self::Aces20
                 | Self::FidelityFxLpm
                 | Self::OpenDrt

@@ -9,6 +9,7 @@ mod gpu;
 mod image_io;
 mod lpm_data;
 mod oklab_aces;
+mod oklab_neutral;
 mod presenter;
 mod reference;
 mod tone_curve;
@@ -25,7 +26,7 @@ use crate::distribution::{ColorSpace, DEFAULT_PITCH, DEFAULT_YAW, DistributionRe
 use crate::file_browser::{FolderBrowser, Thumbnail, ThumbnailLoader};
 use crate::gpu::{
     DrtGpu, DrtKind, LinearLogSigmoidParameters, LogSigmoidParameters, OklabAcesParameters,
-    OklabChromaParameters, ReinhardParameters,
+    OklabChromaParameters, OklabNeutralParameters, ReinhardParameters,
 };
 use crate::presenter::{DisplayOutput, StartupOptions};
 use crate::tone_curve::ToneCurveRenderer;
@@ -41,6 +42,7 @@ fn main() -> anyhow::Result<()> {
     let mut initial_folder = None;
     let mut initial_view = WorkspaceView::Image;
     let mut initial_show_anomalies = false;
+    let mut initial_drt = None;
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
         if argument == "--analysis" {
@@ -49,6 +51,20 @@ fn main() -> anyhow::Result<()> {
             initial_show_anomalies = true;
         } else if argument == "--folder" {
             initial_folder = arguments.next().map(PathBuf::from);
+        } else if argument == "--drt" {
+            let name = arguments
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--drt requires a DRT name"))?;
+            let name = name.to_string_lossy();
+            initial_drt = Some(
+                DrtKind::ALL
+                    .into_iter()
+                    .find(|kind| {
+                        kind.label().eq_ignore_ascii_case(&name)
+                            || kind.shader_file().ends_with(&format!("/{name}.wgsl"))
+                    })
+                    .ok_or_else(|| anyhow::anyhow!("Unknown DRT: {name}"))?,
+            );
         } else if initial_image.is_none() {
             initial_image = Some(PathBuf::from(argument));
         }
@@ -58,6 +74,7 @@ fn main() -> anyhow::Result<()> {
         initial_folder,
         initial_view,
         initial_show_anomalies,
+        initial_drt,
     })
 }
 
@@ -68,6 +85,7 @@ struct DrtApp {
     rgb_log_sigmoid_parameters: LinearLogSigmoidParameters,
     oklab_log_sigmoid_parameters: LinearLogSigmoidParameters,
     oklab_aces_parameters: OklabAcesParameters,
+    oklab_neutral_parameters: OklabNeutralParameters,
     rgb_log_sigmoid_hue_retention: f32,
     oklab_reinhard_parameters: ReinhardParameters,
     oklab_reinhard_chroma: OklabChromaParameters,
@@ -144,6 +162,7 @@ impl DrtApp {
             rgb_log_sigmoid_parameters: LinearLogSigmoidParameters::default(),
             oklab_log_sigmoid_parameters: LinearLogSigmoidParameters::default(),
             oklab_aces_parameters: OklabAcesParameters::default(),
+            oklab_neutral_parameters: OklabNeutralParameters::default(),
             rgb_log_sigmoid_hue_retention: 0.5,
             oklab_reinhard_parameters: ReinhardParameters::oklab_default(),
             oklab_reinhard_chroma: OklabChromaParameters::default(),
@@ -267,12 +286,28 @@ impl DrtApp {
     }
 
     fn load_test_pattern(&mut self) {
-        match self.gpu.set_image(image_io::test_pattern(1280, 720)) {
+        self.load_builtin_pattern(
+            image_io::test_pattern(1280, 720),
+            "Built-in AP0 HDR test pattern",
+            "Built-in test pattern restored",
+        );
+    }
+
+    fn load_color_trajectory_pattern(&mut self) {
+        self.load_builtin_pattern(
+            image_io::color_trajectory_pattern(2048, 976),
+            "Linear sRGB trajectories (61 bands, 0–16384×)",
+            "Loaded 61 linear sRGB color trajectories, 0–16384× scene gain",
+        );
+    }
+
+    fn load_builtin_pattern(&mut self, image: image_io::LinearImage, name: &str, status: &str) {
+        match self.gpu.set_image(image) {
             Ok(()) => {
-                self.image_name = "Built-in AP0 HDR test pattern".to_owned();
+                self.image_name = name.to_owned();
                 self.image_path = None;
                 self.pending_image = None;
-                self.set_status("Built-in test pattern restored".to_owned(), false);
+                self.set_status(status.to_owned(), false);
             }
             Err(error) => self.set_status(format!("Test-pattern creation failed: {error:#}"), true),
         }
@@ -354,6 +389,14 @@ impl DrtApp {
                         self.load_test_pattern();
                         ui.close();
                     }
+                    if ui
+                        .button("Color trajectories (61 bands)")
+                        .on_hover_text("Linear sRGB colors with continuous 0–16384× scene gain")
+                        .clicked()
+                    {
+                        self.load_color_trajectory_pattern();
+                        ui.close();
+                    }
                     ui.separator();
                     if ui.button("Exit  Esc").clicked() {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -431,6 +474,9 @@ impl DrtApp {
                         }
                         DrtKind::OklabAces => {
                             self.gpu.set_oklab_aces_parameters(self.oklab_aces_parameters)
+                        }
+                        DrtKind::OklabNeutral => {
+                            self.gpu.set_oklab_neutral_parameters(self.oklab_neutral_parameters)
                         }
                         DrtKind::RgbLogSigmoid => {
                             self.gpu.set_rgb_log_sigmoid_parameters(self.rgb_log_sigmoid_parameters)
@@ -578,7 +624,7 @@ impl DrtApp {
                                 .step_by(0.025)
                                 .text("Linear slope"),
                         )
-                        .on_hover_text("Exact scene-linear RGB gain below the shoulder; default 1")
+                        .on_hover_text("Linear tone gain below the shoulder; default 1. Gamut-edge chroma is protected at all brightness levels.")
                         .changed();
                     source.constrain();
                     let maximum_start = source.maximum_compression_start();
@@ -619,10 +665,68 @@ impl DrtApp {
                         curve.map_linear(0.18),
                         curve.output_peak,
                     )).small().weak());
-                    ui.label(RichText::new("Fixed highlight chroma fade; linear shadows stay unchanged.").small().weak());
+                    ui.label(RichText::new("Fixed Oklab hue · saturation detail near white · extended highlights").small().weak());
                     self.oklab_aces_parameters = source;
                     if changed {
                         self.gpu.set_oklab_aces_parameters(source);
+                    }
+                }
+                if active_drt == DrtKind::OklabNeutral {
+                    let mut source = self.oklab_neutral_parameters;
+                    ui.separator();
+                    ui.label(RichText::new("Max-RGB Oklab neutral experiment").strong());
+                    ui.label(RichText::new("BT.709 max RGB · root-LMS white path · SDR/HDR").small().weak());
+                    let mut changed = ui
+                        .add(
+                            egui::Slider::new(&mut source.linear_slope, 0.1..=4.0)
+                                .step_by(0.025)
+                                .text("Linear slope"),
+                        )
+                        .on_hover_text("Scene-linear RGB gain below the max-channel shoulder; default 1")
+                        .changed();
+                    source.constrain();
+                    let maximum_start = source.maximum_compression_start();
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut source.compression_start, 0.0..=maximum_start)
+                                .text("Compression start"),
+                        )
+                        .on_hover_text("Maximum linear BT.709 RGB channel at the linear/shoulder join; default 0.6")
+                        .changed();
+                    source.constrain();
+                    let headroom = self.gpu.output_headroom();
+                    let [minimum_reach, maximum_reach] = source.highlight_reach_range(headroom);
+                    let reach_adjustable = maximum_reach - minimum_reach > 0.0001;
+                    let mut highlight_reach = source.curve_for_headroom(headroom).highlight_reach_ev();
+                    if ui
+                        .add_enabled(
+                            reach_adjustable,
+                            egui::Slider::new(&mut highlight_reach, minimum_reach..=maximum_reach)
+                                .step_by(0.25)
+                                .suffix(" EV")
+                                .text("Highlight reach"),
+                        )
+                        .on_hover_text("Scene stops above 18% gray whose maximum channel reaches 98% of the current display peak. Smaller values reach white sooner; larger values extend the highlights. SDR default 10 EV. The linear shadows stay unchanged.")
+                        .changed()
+                    {
+                        source.set_highlight_reach_ev(highlight_reach, headroom);
+                        changed = true;
+                    }
+                    if !reach_adjustable {
+                        ui.label(RichText::new("Lower Compression start to adjust highlight reach.").small().weak());
+                    }
+                    source.constrain();
+                    let curve = source.curve_for_headroom(headroom);
+                    ui.label(RichText::new(format!(
+                        "98% peak at +{:.2} EV · gray {:.3} · peak {:.2}",
+                        curve.highlight_reach_ev(),
+                        curve.map_linear(0.18),
+                        curve.output_peak,
+                    )).small().weak());
+                    ui.label(RichText::new("Root-LMS white path · max-RGB shoulder").small().weak());
+                    self.oklab_neutral_parameters = source;
+                    if changed {
+                        self.gpu.set_oklab_neutral_parameters(source);
                     }
                 }
                 if matches!(active_drt, DrtKind::RgbReinhard | DrtKind::OklabReinhard) {
@@ -1001,6 +1105,7 @@ impl DrtApp {
                     self.rgb_log_sigmoid_parameters = LinearLogSigmoidParameters::default();
                     self.oklab_log_sigmoid_parameters = LinearLogSigmoidParameters::default();
                     self.oklab_aces_parameters = OklabAcesParameters::default();
+                    self.oklab_neutral_parameters = OklabNeutralParameters::default();
                     self.rgb_log_sigmoid_hue_retention = 0.5;
                     self.oklab_reinhard_parameters = ReinhardParameters::oklab_default();
                     self.oklab_reinhard_chroma = OklabChromaParameters::default();
@@ -1014,6 +1119,7 @@ impl DrtApp {
                     self.gpu.set_rgb_log_sigmoid_parameters(self.rgb_log_sigmoid_parameters);
                     self.gpu.set_oklab_log_sigmoid_parameters(self.oklab_log_sigmoid_parameters);
                     self.gpu.set_oklab_aces_parameters(self.oklab_aces_parameters);
+                    self.gpu.set_oklab_neutral_parameters(self.oklab_neutral_parameters);
                     self.gpu.set_rgb_log_sigmoid_hue_retention(
                         self.rgb_log_sigmoid_hue_retention,
                     );
@@ -1034,9 +1140,20 @@ impl DrtApp {
                     if ui.button("Folder…").clicked() {
                         self.open_folder(&context);
                     }
-                    if ui.button("Test pattern").clicked() {
-                        self.load_test_pattern();
-                    }
+                    ui.menu_button("Test patterns", |ui| {
+                        if ui.button("Default HDR pattern (7 bands)").clicked() {
+                            self.load_test_pattern();
+                            ui.close();
+                        }
+                        if ui
+                            .button("Color trajectories (61 bands)")
+                            .on_hover_text("Linear sRGB colors with continuous 0–16384× scene gain")
+                            .clicked()
+                        {
+                            self.load_color_trajectory_pattern();
+                            ui.close();
+                        }
+                    });
                 });
 
                 let mut selected_path = None;

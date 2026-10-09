@@ -22,6 +22,7 @@ pub struct StartupOptions {
     pub initial_folder: Option<std::path::PathBuf>,
     pub initial_view: WorkspaceView,
     pub initial_show_anomalies: bool,
+    pub initial_drt: Option<crate::drt::DrtKind>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -60,8 +61,12 @@ impl ApplicationHandler for NativeApplication {
             return;
         }
         let startup = self.startup.take().expect("startup options are available");
+        let title = startup.initial_drt.map_or_else(
+            || "DRT Bench".to_owned(),
+            |drt| format!("DRT Bench · {}", drt.label()),
+        );
         let attributes = Window::default_attributes()
-            .with_title("DRT Bench")
+            .with_title(title)
             .with_inner_size(LogicalSize::new(1280.0, 760.0))
             .with_min_inner_size(LogicalSize::new(800.0, 520.0));
         let result = event_loop
@@ -204,7 +209,7 @@ impl Graphics {
             renderer,
             surface_config: egui_wgpu::SurfaceConfig::HIGH_THROUGHPUT,
         };
-        let app = DrtApp::new(
+        let mut app = DrtApp::new(
             &render_state,
             &egui_context,
             startup.initial_image.as_deref(),
@@ -213,6 +218,9 @@ impl Graphics {
             startup.initial_show_anomalies,
             display_output,
         )?;
+        if let Some(drt) = startup.initial_drt {
+            app.gpu.set_drt(drt);
+        }
         let compositor = Compositor::new(&device, size, config.format, hdr_surface);
 
         Ok(Self {

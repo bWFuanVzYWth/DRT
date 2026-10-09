@@ -80,6 +80,59 @@ pub fn test_pattern(width: u32, height: u32) -> LinearImage {
     }
 }
 
+const COLOR_TRAJECTORY_LEVELS: [f32; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
+const COLOR_TRAJECTORY_BANDS: usize = 61;
+const COLOR_TRAJECTORY_MAX_GAIN: f64 = 16384.0;
+
+fn color_trajectory_colors() -> [[f32; 3]; COLOR_TRAJECTORY_BANDS] {
+    let mut colors = [[0.0; 3]; COLOR_TRAJECTORY_BANDS];
+    let mut index = 0;
+    for r in COLOR_TRAJECTORY_LEVELS {
+        for g in COLOR_TRAJECTORY_LEVELS {
+            for b in COLOR_TRAJECTORY_LEVELS {
+                if r == 1.0 || g == 1.0 || b == 1.0 {
+                    colors[index] = [r, g, b];
+                    index += 1;
+                }
+            }
+        }
+    }
+    colors
+}
+
+/// 61 discrete linear-sRGB colors, each following the same brightness ray.
+/// The black-inclusive exponential ramp spans shadows through scene gain 2^14.
+/// All pixels are converted to the workbench's scene-linear AP0 input space.
+pub fn color_trajectory_pattern(width: u32, height: u32) -> LinearImage {
+    let colors = color_trajectory_colors().map(rec709_to_ap0);
+    let denominator = f64::from(width.saturating_sub(1).max(1));
+    let gains: Vec<f32> = (0..width)
+        .map(|x| {
+            let u = f64::from(x) / denominator;
+            // Shift the usual -10..+14 EV ramp down to exact black, then
+            // normalize its endpoint. Computing in f64 avoids cancellation
+            // near black and rounding the peak above 2^14.
+            ((2.0_f64.powf(24.0 * u) - 1.0) / (2.0_f64.powi(24) - 1.0) * COLOR_TRAJECTORY_MAX_GAIN)
+                as f32
+        })
+        .collect();
+    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+    for y in 0..height {
+        // Integer allocation gives all 61 bands equal height at the default
+        // 976 rows, without a one-pixel final band or floating-point seams.
+        let band = (u64::from(y) * COLOR_TRAJECTORY_BANDS as u64 / u64::from(height)) as usize;
+        let color = colors[band];
+        for gain in &gains {
+            rgba.extend_from_slice(&[color[0] * gain, color[1] * gain, color[2] * gain, 1.0]);
+        }
+    }
+    LinearImage {
+        width,
+        height,
+        rgba,
+    }
+}
+
 fn srgb_to_linear(value: f32) -> f32 {
     if value <= 0.04045 {
         value / 12.92
@@ -131,5 +184,69 @@ mod tests {
         assert_eq!((pattern.width, pattern.height), (16, 8));
         assert_eq!(pattern.rgba.len(), 16 * 8 * 4);
         assert!(pattern.rgba.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn color_trajectories_cover_the_requested_grid_and_hdr_rays() {
+        let colors = color_trajectory_colors();
+        let mut seen = std::collections::HashSet::new();
+        for rgb in colors {
+            assert!(rgb.contains(&1.0));
+            assert!(
+                rgb.into_iter()
+                    .all(|channel| COLOR_TRAJECTORY_LEVELS.contains(&channel))
+            );
+            assert!(seen.insert(rgb.map(|channel| (channel * 4.0) as u8)));
+        }
+        assert_eq!(seen.len(), 5_usize.pow(3) - 4_usize.pow(3));
+
+        let width = 65;
+        let height = COLOR_TRAJECTORY_BANDS as u32 * 2;
+        let image = color_trajectory_pattern(width, height);
+        assert_eq!(image.rgba.len(), width as usize * height as usize * 4);
+        for (band, color) in colors.into_iter().enumerate() {
+            let start = band * 2 * width as usize * 4;
+            let row = &image.rgba[start..start + width as usize * 4];
+            assert_eq!(
+                row,
+                &image.rgba[start + width as usize * 4..start + 2 * width as usize * 4]
+            );
+            assert_eq!(&row[..4], &[0.0, 0.0, 0.0, 1.0]);
+            let endpoint =
+                rec709_to_ap0(color).map(|channel| channel * COLOR_TRAJECTORY_MAX_GAIN as f32);
+            assert_eq!(&row[row.len() - 4..row.len() - 1], &endpoint);
+            for pair in row.as_chunks::<4>().0.windows(2) {
+                assert!(
+                    pair[1][..3]
+                        .iter()
+                        .zip(&pair[0][..3])
+                        .all(|(next, prev)| next >= prev)
+                );
+            }
+            for pixel in row.as_chunks::<4>().0 {
+                assert_eq!(pixel[3], 1.0);
+                assert!(
+                    pixel[..3]
+                        .iter()
+                        .all(|value| value.is_finite() && *value >= 0.0 && *value < 65504.0)
+                );
+                // Every intermediate pixel lies on the same AP0 ray; there
+                // is no interpolation between neighboring discrete colors.
+                let gain = pixel[0] / endpoint[0];
+                for channel in 1..3 {
+                    assert!((pixel[channel] - endpoint[channel] * gain).abs() < 0.003);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn color_trajectory_pattern_handles_small_and_empty_dimensions() {
+        for (width, height) in [(0, 0), (0, 1), (1, 0), (1, 1), (2, 3), (3, 67)] {
+            let image = color_trajectory_pattern(width, height);
+            assert_eq!((image.width, image.height), (width, height));
+            assert_eq!(image.rgba.len(), width as usize * height as usize * 4);
+            assert!(image.rgba.iter().all(|value| value.is_finite()));
+        }
     }
 }
