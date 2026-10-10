@@ -37,7 +37,7 @@ sRGB / Oklab 颜色分布图按当前 DRT 的输出范围自动缩放，并适�
 
 `AgX-S2O3` 是 linlin 对原始参考的移植，结构与原始参考相同，但并非 AgX 原作者的原始 Python 实现。本仓库的 WGSL 版本移植自 linlin 的 GLSL 参考移植，具体来源版本记录在文件头；linlin 的署名指移植实现，原始算法来源仍为 AgX-S2O3。该参考保留原名。
 
-`RGB Reinhard` 使用逐通道线性暗部与 Reinhard 肩部。默认线性斜率为 1、压缩起点为 0.18、SDR Highlight reach 为 10 EV；通过 0.04 的虚拟 RGB inset 与默认 0.5 的 HSV 色相回拉控制彩色表现。支持 SDR/HDR，参数独立保存。彩色像素还经过 inset/outset 与色相处理，灰轴的精确线性不代表所有彩色暗部都与 None 相同。
+`RGB Reinhard` 使用逐通道线性暗部与 Reinhard 肩部。默认线性斜率为 1、压缩起点为 0.18、SDR Highlight reach 为 10 EV；通过 0.04 的虚拟 RGB inset 与默认 0.75 的 HSV 色相回拉控制彩色表现。支持 SDR/HDR，参数独立保存。彩色像素还经过 inset/outset 与色相处理，灰轴的精确线性不代表所有彩色暗部都与 None 相同。
 
 `Oklab ACES-inspired` 是借鉴 ACES 2 分离亮度与色彩强度处理的原创实验，不是官方 ACES 移植。统一输入转换后，在 Oklab 中依次处理 `L³ → 长肩部亮度映射 → 固定色相的柔性色度边界 → 显示 RGB`，支持 SDR/HDR。亮度曲线的低段仍为 `Linear slope × L³`，灰轴保持线性；彩色边缘从暗部起连续保护，避免在肩部接点突然压缩色度。色域边缘颜色不保证与 None 完全一致。
 
@@ -45,9 +45,9 @@ sRGB / Oklab 颜色分布图按当前 DRT 的输出范围自动缩放，并适�
 
 颜色阶段复用旧 Oklab 的固定色相边界和 soft-min，使用固定默认系数，不继承另一款 DRT 的色度控件。以 `L'/peak^(1/3)` 归一化查询边界，再恢复实际 HDR 明度和色度，使映射后的正常颜色已在目标显示范围内，避免逐 RGB 通道裁切造成品红/蓝色偏移。
 
-边界采用无 LUT 的解析计算：先求固定色相的 cusp，只有明度超过 cusp 时才修正 RGB=1 的上边界，且修正候选必须具有正的一阶导数。这样避免黄色／黄绿色在 cusp 以下外推求解时丢失上边界约束所造成的色度跳变，同时省去低明度区域的上边界求解。边界圆角的四次 soft-min 使用乘法和两次平方根，与原公式等价；实际输入色度的可变幂次 soft-min 保留原样。Oklab 逆变换具有三次齐次性，因此使用 `Lnorm = (outputBrightness/peak)^(1/3)` 重建单位峰值 RGB 后再乘 `peak`，省去单独计算显示峰值的立方根。
+边界采用无 LUT 的解析计算：先求固定色相的 cusp，只有明度超过 cusp 时才修正 RGB=1 的上边界，且修正候选必须具有正的一阶导数。这样避免黄色／黄绿色在 cusp 以下外推求解时丢失上边界约束所造成的色度跳变，同时省去低明度区域的上边界求解。白侧的四次 soft-min 使用乘法和两次平方根，与原公式等价；黑侧使用原有可变幂次 soft-min。Oklab 逆变换具有三次齐次性，因此使用 `Lnorm = (outputBrightness/peak)^(1/3)` 重建单位峰值 RGB 后再乘 `peak`，省去单独计算显示峰值的立方根。
 
-颜色阶段在全部明度范围使用同一条固定色相 soft-min 映射：`outputSaturation = softMin(inputSaturation, displayCap, roundingPower)`。近白区 0.90–0.97 的源饱和度分级混合已经撤回，避免在这一段切换映射而使趋白轨迹转弯；近白的不同饱和度可能再次趋近同一显示边界。长肩部、10 EV 默认和显示边界的蓝色保护保持原样，没有额外 `1 − w²` 或 `1 − L^12` 衰减。原高光去色和纯色保护控件继续删除。
+颜色阶段在全部明度范围连续执行黑侧保护和白侧褪色：`blackFit = softMin(inputSaturation, maximumSaturation, roundingPower)`，再执行 `outputSaturation = softMin4(blackFit, whiteCap)`。让低色度的浅黄色在接近上边界前渐进褪色，扩大趋白转弯的过渡段；纯蓝色的轨迹变化很小。该调整只改变色度，不改变 Oklab 明度肩部和色相，也不增加 LUT 或额外去色控件。RGB 立方体棱边造成的上边界折角仍可能保留。近白区 0.90–0.97 的源饱和度分级混合已经撤回；长肩部、10 EV 默认和显示边界的蓝色保护保持原样，没有额外 `1 − w²` 或 `1 − L^12` 衰减。
 
 ## 参数约定
 
@@ -59,7 +59,7 @@ sRGB / Oklab 颜色分布图按当前 DRT 的输出范围自动缩放，并适�
 | Compression start | 两款研究基线 | 0.18；RGB Reinhard 的虚拟 RGB 通道值 / Oklab ACES-inspired 的 Oklab L³ 分段点 |
 | Highlight reach | 两款研究基线 | 默认 SDR 10 EV；以 18% 灰为基准。RGB Reinhard 表示到达显示峰值的输入，Oklab ACES-inspired 表示到达当前峰值 98% 的输入 |
 | Gamut compression | RGB Reinhard | 0.04；虚拟 RGB inset 系数，可调范围 0–0.8 |
-| Hue retention | RGB Reinhard | 0.5；全亮度范围一致的 HSV 色相回拉 |
+| Hue retention | RGB Reinhard | 0.75；全亮度范围一致的 HSV 色相回拉 |
 
 分段点上限为 `0.99 / Linear slope`，保证接点输出低于 SDR 白。Oklab ACES-inspired 的肩部幂次由 Highlight reach 反推，控件范围随曲线与显示峰值变化。其色度边界系数固定，不提供旧研究版本的四个色度控件。
 

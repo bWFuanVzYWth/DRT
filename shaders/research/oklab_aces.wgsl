@@ -182,15 +182,14 @@ fn softMin4(value: f32, limit: f32) -> f32 {
     return lower / sqrt(sqrt(1.0 + ratio2 * ratio2));
 }
 
-fn saturationCap(lightness: f32, maximumSaturation: f32, direction: vec3f) -> f32 {
+fn whiteSaturationCap(lightness: f32, maximumSaturation: f32, direction: vec3f) -> f32 {
     if (lightness <= 0.0) {
-        return maximumSaturation;
+        return 1.0e20;
     }
     if (lightness >= 1.0) {
         return 0.0;
     }
     let cusp: f32 = cuspLightness(maximumSaturation, direction);
-    let blackChroma: f32 = lightness * maximumSaturation;
     var whiteChroma: f32 = cusp * maximumSaturation * (1.0 - lightness) / (1.0 - cusp);
     // Below the cusp the black boundary controls the gamut. Refining the
     // extrapolated upper line there can cross a derivative singularity and
@@ -201,8 +200,7 @@ fn saturationCap(lightness: f32, maximumSaturation: f32, direction: vec3f) -> f3
     let t: f32 = clamp((lightness - cusp) / (1.0 - cusp), 0.0, 1.0);
     let shoulder: f32 = t * (1.0 - t);
     whiteChroma *= 1.0 - 0.0035 * 16.0 * shoulder * shoulder;
-    let roundedChroma: f32 = softMin4(blackChroma, whiteChroma);
-    return max(roundedChroma / lightness, 0.0);
+    return max(whiteChroma / lightness, 0.0);
 }
 
 fn roundingPower(lightness: f32) -> f32 {
@@ -254,13 +252,15 @@ fn mapLinearRgb(color: vec3f) -> vec3f {
     // and scale the resulting RGB, avoiding a separate peak cube root.
     let normalizedLightness = clamp(
         pow(outputBrightness / parameters.linearOutputPeak, 1.0 / 3.0), 0.0, 1.0);
-    let cap = saturationCap(normalizedLightness, maximumSaturation, direction);
-    let outputSaturation = softMin(inputSaturation, cap, roundingPower(normalizedLightness));
+    let blackFittedSaturation = softMin(
+        inputSaturation, maximumSaturation, roundingPower(normalizedLightness));
+    let whiteCap = whiteSaturationCap(normalizedLightness, maximumSaturation, direction);
+    let outputSaturation = softMin4(blackFittedSaturation, whiteCap);
 
-    // Apply one continuous fixed-hue constraint from black to white. A hard
-    // shadow bypass would jump at the shoulder join for saturated colors.
-    // The shrinking display boundary provides the highlight chroma fade;
-    // no separate shoulder-progress desaturation is needed.
+    // Fit the black side with the original high power, then fade toward the
+    // white side with a gentler power. Low-chroma highlights begin fading
+    // before they reach the shrinking cap, softening pale-yellow turns.
+    // Both stages keep Lab lightness and hue; no separate EV fade is needed.
     return (OKLAB_ACES_RGB_HEADROOM * parameters.linearOutputPeak) * oklabToRgb(vec3f(
         normalizedLightness, normalizedLightness * outputSaturation * hue));
 }

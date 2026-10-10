@@ -63,6 +63,10 @@ fn oklab_aces_kernel_shader(expression: &str) -> String {
 }
 
 fn oklab_aces_kernel_shader_from_source(source: &str, expression: &str) -> String {
+    oklab_aces_kernel_shader_vec4_from_source(source, &format!("vec4f({expression}, 1.0)"))
+}
+
+fn oklab_aces_kernel_shader_vec4_from_source(source: &str, expression: &str) -> String {
     let helpers = source.split("@compute").next().unwrap();
     format!(
         r#"{helpers}
@@ -72,7 +76,7 @@ fn oklab_aces_kernel_shader_from_source(source: &str, expression: &str) -> Strin
             let source = textureLoad(inputTexture, vec2i(id.xy), 0).rgb
                 * parameters.exposureMultiplier;
             let result = {expression};
-            textureStore(outputTexture, vec2i(id.xy), vec4f(result, 1.0));
+            textureStore(outputTexture, vec2i(id.xy), result);
         }}
         "#
     )
@@ -585,17 +589,17 @@ fn oklab_aces_validation_display_labs(encoded: &[f32]) -> Vec<[f64; 3]> {
 
 #[test]
 #[ignore = "requires a GPU; run with --ignored --nocapture"]
-fn oklab_aces_same_h_highlights_use_one_soft_min_through_white() {
+fn oklab_aces_same_h_highlights_fit_black_before_gentle_white_fade() {
     let gpu = TestGpu::new();
     let source = crate::oklab_aces::OklabAcesParameters::default();
-    // Read the mapper's source saturation and display boundary separately.
-    // The f64 oracle below evaluates the original soft minimum; it never
-    // invokes the shader's softMin or a near-white saturation-rank blend.
+    // Read the mapper's source saturation and both boundaries separately.
+    // The f64 oracle below evaluates both fits independently; it never calls
+    // the shader's softMin or a near-white saturation-rank blend.
     let shader = builtin_shader(DrtKind::OklabAces);
     let helpers = shader.split("@compute").next().unwrap();
     let diagnostic_shader = format!(
         r#"{helpers}
-        fn validationSaturationInputs(color: vec3f) -> vec3f {{
+        fn validationSaturationInputs(color: vec3f) -> vec4f {{
             let lab = rgbToOklab(color);
             let brightness = lab.x * lab.x * lab.x;
             let gain = parameters.oklabAcesLinearSlope;
@@ -612,8 +616,8 @@ fn oklab_aces_same_h_highlights_use_one_soft_min_through_white() {
             let hue = lab.yz / inputChroma;
             let direction = rootDirection(hue);
             let maximumSaturation = connectedSaturation(hue, maxSaturation(hue, direction));
-            return vec3f(inputChroma / lab.x,
-                saturationCap(normalizedLightness, maximumSaturation, direction),
+            return vec4f(inputChroma / lab.x, maximumSaturation,
+                whiteSaturationCap(normalizedLightness, maximumSaturation, direction),
                 roundingPower(normalizedLightness));
         }}
         "#
@@ -627,7 +631,7 @@ fn oklab_aces_same_h_highlights_use_one_soft_min_through_white() {
                 &gpu.device,
                 &gpu.layout,
                 &oklab_aces_kernel_shader(&oklab_aces_validation_same_h_expression(hue, operation)),
-                "same-h original soft-min mapping",
+                "same-h black fit and white fade",
             )
             .unwrap()
         };
@@ -641,7 +645,7 @@ fn oklab_aces_same_h_highlights_use_one_soft_min_through_white() {
         let diagnostic_pipeline = create_pipeline(
             &gpu.device,
             &gpu.layout,
-            &oklab_aces_kernel_shader_from_source(&diagnostic_shader, &input_expression),
+            &oklab_aces_kernel_shader_vec4_from_source(&diagnostic_shader, &input_expression),
             "independent soft-min inputs",
         )
         .unwrap();
@@ -669,17 +673,20 @@ fn oklab_aces_same_h_highlights_use_one_soft_min_through_white() {
                 let context =
                     format!("h {degrees}, Ln {normalized}, peak {headroom}: {saturation:?}");
                 for (actual, inputs) in saturation.iter().zip(diagnostic.as_chunks::<4>().0) {
-                    let [value, limit, power] = [inputs[0], inputs[1], inputs[2]].map(f64::from);
-                    assert!(value > 0.0 && limit > 0.0 && power > 0.0);
-                    let lower = value.min(limit);
-                    let higher = value.max(limit);
-                    let expected = lower * (1.0 + (lower / higher).powf(power)).powf(-1.0 / power);
+                    let [value, black_limit, white_limit, power] = inputs.map(f64::from);
+                    assert!(value > 0.0 && black_limit > 0.0 && white_limit > 0.0 && power > 0.0);
+                    let soft_min = |value: f64, limit: f64, power: f64| {
+                        let lower = value.min(limit);
+                        let higher = value.max(limit);
+                        lower * (1.0 + (lower / higher).powf(power)).powf(-1.0 / power)
+                    };
+                    let expected = soft_min(soft_min(value, black_limit, power), white_limit, 4.0);
                     // The scalar inputs and output Lab use independent fp16
                     // readbacks. Allow their rounding, but reject the prior
                     // rank-scaled cap and its 0.90..0.97 interpolation.
                     assert!(
                         (f64::from(*actual) - expected).abs() < 0.004 * expected + 0.000_02,
-                        "original soft minimum changed: {context}; inputs {inputs:?}, expected {expected}"
+                        "black/white fitting changed: {context}; inputs {inputs:?}, expected {expected}"
                     );
                 }
                 for (lab, rgb) in actual.iter().zip(raw_rgb.as_chunks::<4>().0) {
@@ -754,7 +761,8 @@ fn oklab_aces_yellow_green_gamut_boundary_has_no_isolated_jumps() {
                 let direction = rootDirection(VALIDATION_HUE);
                 let maximumSaturation = connectedSaturation(
                     VALIDATION_HUE, maxSaturation(VALIDATION_HUE, direction));
-                return saturationCap(validationBoundaryLightness(sample), maximumSaturation, direction);
+                return softMin4(maximumSaturation,
+                    whiteSaturationCap(validationBoundaryLightness(sample), maximumSaturation, direction));
             }}
             fn validationBoundaryRgb(sample: f32) -> vec3f {{
                 let normalized = validationBoundaryLightness(sample);
@@ -840,6 +848,109 @@ fn oklab_aces_yellow_green_gamut_boundary_has_no_isolated_jumps() {
             eprintln!(
                 "{context}: maximum cap step {maximum_cap_step}, encoded blue step {maximum_blue_step}"
             );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a GPU; run with --ignored --nocapture"]
+fn oklab_aces_pale_yellow_fades_over_a_broad_lightness_interval() {
+    let gpu = TestGpu::new();
+    let source = crate::oklab_aces::OklabAcesParameters::default();
+    const LAST_SAMPLE: u32 = 1024;
+    // Reconstruct the scene values in WGSL from exact integer sample IDs.
+    // This avoids fp16 input steps obscuring the short near-white interval.
+    let input: Vec<_> = (0..=LAST_SAMPLE)
+        .flat_map(|sample| [sample as f32, 0.0, 0.0, 1.0])
+        .collect();
+    for (base, first_l, last_l, minimum_fade_width) in [
+        ([1.0, 1.0, 0.5], 0.93, 0.9998, 0.010),
+        ([1.0, 1.0, 0.75], 0.93, 0.9998, 0.0055),
+        ([0.0, 0.0, 1.0], 0.35, 0.90, 0.19),
+    ] {
+        let unit_lab = oklab_aces_validation_lab(base);
+        let chroma = unit_lab[1].hypot(unit_lab[2]);
+        let hue = [unit_lab[1] / chroma, unit_lab[2] / chroma];
+        let saturation = chroma / unit_lab[0];
+        let shader = builtin_shader(DrtKind::OklabAces);
+        let helpers = shader.split("@compute").next().unwrap();
+        let diagnostic_shader = format!(
+            r#"{helpers}
+            fn validationNearWhiteSource(sample: f32) -> vec3f {{
+                let normalized = {first_l:.12}
+                    + ({last_l:.12} - {first_l:.12}) * sample / 1024.0;
+                let peak = parameters.linearOutputPeak;
+                let outputBrightness = peak * normalized * normalized * normalized;
+                let gain = parameters.oklabAcesLinearSlope;
+                let join = parameters.oklabAcesCompressionStart;
+                var inputBrightness = outputBrightness / gain;
+                if outputBrightness > gain * join {{
+                    let extent = peak - gain * join;
+                    let power = parameters.oklabAcesShoulderPower;
+                    let q = power * (pow((peak - outputBrightness) / extent, -1.0 / power) - 1.0);
+                    inputBrightness = join + extent * q / gain;
+                }}
+                let inputLightness = pow(inputBrightness, 1.0 / 3.0);
+                return oklabToRgb(vec3f(inputLightness,
+                    inputLightness * {saturation:.12} * vec2f({hue_a:.12}, {hue_b:.12})));
+            }}
+            "#,
+            hue_a = hue[0],
+            hue_b = hue[1],
+        );
+        let pipeline = create_pipeline(
+            &gpu.device,
+            &gpu.layout,
+            &oklab_aces_kernel_shader_from_source(
+                &diagnostic_shader,
+                "rgbToOklab(mapLinearRgb(validationNearWhiteSource(source.x)))",
+            ),
+            "pale-yellow gradual highlight fade",
+        )
+        .unwrap();
+        for headroom in [1.0_f32, 4.0, 64.0] {
+            let mut parameters = Parameters::new(LAST_SAMPLE + 1, 1);
+            parameters.set_oklab_aces_for_headroom(source, headroom);
+            let output = gpu.render(&pipeline, parameters, &input);
+            let pixels = output.as_chunks::<4>().0;
+            let retention: Vec<_> = pixels
+                .iter()
+                .enumerate()
+                .map(|(index, lab)| {
+                    let normalized =
+                        first_l + (last_l - first_l) * index as f64 / f64::from(LAST_SAMPLE);
+                    assert!(lab[..3].iter().all(|channel| channel.is_finite()));
+                    assert!(
+                        (f64::from(lab[0]) / f64::from(headroom).cbrt() - normalized).abs()
+                            < 0.002,
+                        "highlight fade changed L for {base:?}, peak {headroom}, sample {index}"
+                    );
+                    let error = oklab_aces_validation_hue_error(
+                        [1.0, hue[0], hue[1]],
+                        [f64::from(lab[0]), f64::from(lab[1]), f64::from(lab[2])],
+                    );
+                    assert!(error < 0.5, "highlight fade changed hue by {error} degrees");
+                    f64::from(lab[1].hypot(lab[2]) / lab[0]) / saturation
+                })
+                .collect();
+            let initial = retention[0];
+            let crossing = |fraction| {
+                retention
+                    .iter()
+                    .position(|value| *value < initial * fraction)
+                    .expect("highlight fade must reach both retention levels")
+            };
+            let begin = crossing(0.95);
+            let half = crossing(0.5);
+            let fade_width = (last_l - first_l) * (half - begin) as f64 / f64::from(LAST_SAMPLE);
+            // Pale yellows previously retained almost all color until the
+            // white boundary, then turned within only 0.0065 / 0.0034 L.
+            // Require a wider transition, while retaining blue's long fade.
+            assert!(
+                fade_width > minimum_fade_width,
+                "abrupt near-white fade for {base:?}, peak {headroom}: width {fade_width}"
+            );
+            eprintln!("source {base:?}, peak {headroom}: 95%-to-50% fade width {fade_width}");
         }
     }
 }

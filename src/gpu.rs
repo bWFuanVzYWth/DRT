@@ -90,7 +90,7 @@ impl Default for ReinhardParameters {
             compression_start: DEFAULT_COMPRESSION_START,
             gamut_compression: DEFAULT_GAMUT_COMPRESSION,
             highlight_reach_ev: 10.0,
-            hue_retention: 0.5,
+            hue_retention: 0.75,
         }
     }
 }
@@ -1386,7 +1386,7 @@ mod tests {
         assert_eq!(DEFAULT_GAMUT_COMPRESSION, 0.04);
         assert_eq!(source.linear_slope, 1.0);
         assert_eq!(source.highlight_reach_ev, 10.0);
-        assert_eq!(source.hue_retention, 0.5);
+        assert_eq!(source.hue_retention, 0.75);
         assert_eq!(
             source.curve_for_headroom(1.0).compression_start,
             DEFAULT_COMPRESSION_START
@@ -1401,7 +1401,7 @@ mod tests {
         );
         assert!((curve.map_linear(0.18) - 0.18).abs() < 1.0e-7);
         assert_eq!(parameters.linear_output_peak, 1.0);
-        assert_eq!(parameters.rgb_hue_retention, 0.5);
+        assert_eq!(parameters.rgb_hue_retention, 0.75);
         assert_eq!(parameters.linear_curve_peak, curve.curve_peak);
         assert!(curve.curve_peak > 1.0 && curve.curve_peak < 1.01);
         assert_eq!(std::mem::size_of::<Parameters>(), 120);
