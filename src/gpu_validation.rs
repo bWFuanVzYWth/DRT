@@ -255,37 +255,12 @@ fn drt_gpu_comparison_uses_independent_curves_and_refreshes() {
     let render_state = gpu.render_state();
     let mut image = crate::image_io::test_pattern(31, 7);
     let mut drt = DrtGpu::new(&render_state, image.clone()).unwrap();
-    drt.set_rgb_log_sigmoid_parameters(LinearLogSigmoidParameters {
-        linear_slope: 0.5,
-        compression_start: 0.4,
-        highlight_ev: 12.0,
-        ..LinearLogSigmoidParameters::default()
-    });
-    drt.set_oklab_log_sigmoid_parameters(LinearLogSigmoidParameters {
-        linear_slope: 1.5,
-        compression_start: 0.3,
-        highlight_ev: 8.0,
-        ..LinearLogSigmoidParameters::default()
-    });
     drt.set_rgb_reinhard_parameters(ReinhardParameters {
         linear_slope: 0.75,
         compression_start: 0.5,
         highlight_reach_ev: 12.0,
         ..ReinhardParameters::default()
     });
-    drt.set_oklab_reinhard_parameters(ReinhardParameters {
-        linear_slope: 2.0,
-        compression_start: 0.1,
-        highlight_reach_ev: 7.0,
-        ..ReinhardParameters::oklab_default()
-    });
-    drt.set_oklab_chroma_parameters(
-        DrtKind::OklabLogSigmoid,
-        OklabChromaParameters {
-            highlight_chroma_power: 20.0,
-            ..OklabChromaParameters::default()
-        },
-    );
     let mut oklab_aces = crate::oklab_aces::OklabAcesParameters {
         linear_slope: 0.8,
         compression_start: 0.35,
@@ -322,18 +297,18 @@ fn drt_gpu_comparison_uses_independent_curves_and_refreshes() {
     }
 
     drt.set_drt(DrtKind::RgbReinhard);
-    drt.set_comparison_drt(Some(DrtKind::OklabLogSigmoid));
+    drt.set_comparison_drt(Some(DrtKind::OklabAces));
     for (exposure, headroom, anomalies) in [(0.0, 1.0, true), (-1.0, 64.0, false)] {
         drt.set_exposure(exposure);
         drt.set_hdr_headroom(headroom);
         drt.set_show_anomalies(anomalies);
-        drt.set_oklab_log_sigmoid_parameters(LinearLogSigmoidParameters {
+        drt.set_oklab_aces_parameters(crate::oklab_aces::OklabAcesParameters {
             linear_slope: 0.4,
             compression_start: 0.5,
-            ..LinearLogSigmoidParameters::default()
+            ..Default::default()
         });
         let comparison = gpu.read_texture(&drt.comparison.as_ref().unwrap()._output);
-        drt.set_drt(DrtKind::OklabLogSigmoid);
+        drt.set_drt(DrtKind::OklabAces);
         assert_eq!(
             comparison,
             gpu.render(
@@ -359,7 +334,7 @@ fn drt_gpu_comparison_uses_independent_curves_and_refreshes() {
     drt.set_image(image.clone()).unwrap();
     assert_eq!(drt.comparison_texture_id(), texture_id);
     let comparison = gpu.read_texture(&drt.comparison.as_ref().unwrap()._output);
-    drt.set_drt(DrtKind::OklabLogSigmoid);
+    drt.set_drt(DrtKind::OklabAces);
     assert_eq!(
         comparison,
         gpu.render(
@@ -374,7 +349,7 @@ fn drt_gpu_comparison_uses_independent_curves_and_refreshes() {
     let file =
         std::env::temp_dir().join(format!("drt-comparison-test-{}.wgsl", std::process::id()));
     std::fs::write(&file, "invalid WGSL").unwrap();
-    assert!(drt.reload_shader(DrtKind::OklabLogSigmoid, &file).is_err());
+    assert!(drt.reload_shader(DrtKind::OklabAces, &file).is_err());
     assert_eq!(
         gpu.read_texture(&drt.comparison.as_ref().unwrap()._output),
         comparison
@@ -392,7 +367,7 @@ fn drt_gpu_comparison_uses_independent_curves_and_refreshes() {
         "#,
     )
     .unwrap();
-    drt.reload_shader(DrtKind::OklabLogSigmoid, &file).unwrap();
+    drt.reload_shader(DrtKind::OklabAces, &file).unwrap();
     std::fs::remove_file(&file).unwrap();
     for pixel in gpu
         .read_texture(&drt.comparison.as_ref().unwrap()._output)
@@ -429,23 +404,16 @@ fn drt_gpu_outputs() {
             let mut parameters = Parameters::new(image.width, image.height);
             let headroom = [1.0, 4.0, 64.0][variant % 3];
             let mut reinhard = ReinhardParameters::default();
-            let mut oklab = ReinhardParameters::oklab_default();
-            let mut sigmoid = LinearLogSigmoidParameters::default();
             if variant >= 3 {
                 reinhard.hue_retention = 0.25;
                 reinhard.linear_slope = 2.0;
                 reinhard.compression_start = 0.3;
                 reinhard.gamut_compression = 0.2;
                 reinhard.highlight_reach_ev = 8.0;
-                oklab.linear_slope = 1.5;
-                oklab.compression_start = 0.5;
-                oklab.highlight_reach_ev = 12.0;
-                sigmoid.compression_start = 0.5;
-                sigmoid.gamut_compression = 0.2;
                 parameters.exposure_multiplier = 4.0;
             }
-            parameters.set_reinhard_for_drt(drt, oklab, reinhard, headroom);
-            if matches!(drt, DrtKind::OklabAces | DrtKind::Aces20Curve) {
+            parameters.set_reinhard_for_drt(drt, reinhard, headroom);
+            if drt == DrtKind::OklabAces {
                 let mut source = crate::oklab_aces::OklabAcesParameters::default();
                 if variant >= 3 {
                     source.linear_slope = 1.5;
@@ -454,34 +422,11 @@ fn drt_gpu_outputs() {
                 }
                 parameters.set_oklab_aces_for_headroom(source, headroom);
             }
-            if drt == DrtKind::OklabNeutral {
-                let mut source = OklabNeutralParameters::default();
-                if variant >= 3 {
-                    source.linear_slope = 1.5;
-                    source.compression_start = 0.4;
-                    source.set_highlight_reach_ev(14.0, headroom);
-                }
-                parameters.set_oklab_neutral_for_headroom(source, headroom);
-            }
-            if drt.uses_linear_log_sigmoid() {
-                parameters.set_linear_log_sigmoid_for_headroom(
-                    sigmoid,
-                    if drt == DrtKind::RgbLogSigmoid {
-                        headroom
-                    } else {
-                        1.0
-                    },
-                );
-            } else {
-                parameters.set_log_sigmoid(LogSigmoidParameters::default());
-            }
+            parameters.set_log_sigmoid(LogSigmoidParameters::default());
             let pixels = gpu.render_kind(&pipeline, parameters, &image.rgba, drt, headroom);
             assert!(pixels.iter().all(|v| v.is_finite() && *v >= 0.0));
             assert!(pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 1.0));
-            let peak = match drt {
-                DrtKind::RgbLogSigmoid => parameters.log_sigmoid_output_peak,
-                _ => extended_srgb_oetf(direct_output_headroom(drt, headroom)),
-            };
+            let peak = extended_srgb_oetf(direct_output_headroom(drt, headroom));
             assert!(
                 pixels
                     .as_chunks::<4>()
@@ -506,28 +451,6 @@ fn drt_gpu_outputs() {
                         "{} headroom {headroom}: neutral ramp {:?}",
                         drt.label(),
                         pixel
-                    );
-                }
-            }
-            if drt == DrtKind::OklabReinhard {
-                // Oklab Reinhard applies its independent curve in L^3.
-                // Allow fp16 storage and the AP0/Rec.709 neutral-axis rounding.
-                let curve = oklab.curve_for_headroom(1.0);
-                for (pixel, input) in ramp
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .zip(image.rgba.as_chunks::<4>().0)
-                {
-                    let value =
-                        half::f16::from_f32(input[0]).to_f32() * parameters.exposure_multiplier;
-                    let mapped = curve.map_linear(value);
-                    let expected = extended_srgb_oetf((mapped * 0.99999).clamp(0.0, 1.0));
-                    assert!(
-                        (pixel[0] - expected).abs() < 0.003,
-                        "{} curve: expected {expected}, got {}",
-                        drt.label(),
-                        pixel[0]
                     );
                 }
             }
@@ -570,12 +493,6 @@ fn drt_gpu_diagnostics() {
                 [f32::INFINITY, f32::NEG_INFINITY, 0.0],
             ] {
                 let mut parameters = Parameters::new(1, 1);
-                if drt.uses_linear_log_sigmoid() {
-                    parameters.set_linear_log_sigmoid_for_headroom(
-                        LinearLogSigmoidParameters::default(),
-                        1.0,
-                    );
-                }
                 parameters.show_anomalies = show_anomalies;
                 pixels.extend(gpu.render_kind(
                     &pipeline,
@@ -618,393 +535,115 @@ fn drt_gpu_diagnostics() {
 
 #[test]
 #[ignore = "requires a GPU; run with --ignored --nocapture"]
-fn rgb_log_sigmoid_analytic_shadows_and_original_shoulder() {
+fn rgb_gamut_controls_change_colors_and_preserve_neutrals() {
+    let gpu = TestGpu::new();
+    let image = crate::image_io::test_pattern(63, 9);
+    let name = "RGB Reinhard";
+    let shader = BUILT_RGB_REINHARD_SHADER;
+    let pipeline = create_pipeline(&gpu.device, &gpu.layout, shader, name).unwrap();
+    for headroom in [1.0, 64.0] {
+        let outputs: Vec<_> = [0.0, 0.04, 0.8]
+            .into_iter()
+            .map(|gamut_compression| {
+                let mut parameters = Parameters::new(image.width, image.height);
+                parameters.set_reinhard_for_headroom(
+                    ReinhardParameters {
+                        compression_start: 0.3,
+                        gamut_compression,
+                        ..ReinhardParameters::default()
+                    },
+                    headroom,
+                );
+                gpu.render(&pipeline, parameters, &image.rgba)
+            })
+            .collect();
+        for pair in outputs.windows(2) {
+            assert!(
+                pair[1]
+                    .iter()
+                    .all(|value| value.is_finite() && *value >= 0.0)
+            );
+            let gray_end = image.width as usize * 4;
+            for (before, after) in pair[0][..gray_end].iter().zip(&pair[1][..gray_end]) {
+                assert!(
+                    (before - after).abs() < before * 0.003 + 2.0e-7,
+                    "{name}, headroom {headroom}: neutral changed from {before} to {after}"
+                );
+            }
+            let color_difference = pair[0][gray_end..]
+                .iter()
+                .zip(&pair[1][gray_end..])
+                .map(|(before, after)| (before - after).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                color_difference > 0.01,
+                "{name}: gamut slider has no visible effect"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a GPU; run with --ignored --nocapture"]
+fn rgb_reinhard_neutral_curve_keeps_its_linear_join_and_hdr_reach() {
     let gpu = TestGpu::new();
     let pipeline = create_pipeline(
         &gpu.device,
         &gpu.layout,
-        BUILT_RGB_LOG_SIGMOID_SHADER,
-        "analytic log curve",
+        BUILT_RGB_REINHARD_SHADER,
+        "RGB Reinhard neutral-axis calibration",
     )
     .unwrap();
-    // Probe the production scalar curve separately from the color transforms.
-    let scalar_shader = BUILT_RGB_LOG_SIGMOID_SHADER.replace(
-        "let mapped: vec3f = adjustHsv(originalLinear, rgbLogSigmoid(originalLinear));",
-        "let mapped: vec3f = logSigmoidCurve(ap0);",
-    );
-    assert_ne!(scalar_shader, BUILT_RGB_LOG_SIGMOID_SHADER);
-    let scalar_pipeline = create_pipeline(
-        &gpu.device,
-        &gpu.layout,
-        &scalar_shader,
-        "scalar log curve probe",
-    )
-    .unwrap();
-    let mut ramp = vec![0.0];
-    ramp.extend((0..=256).map(|i| 0.18 * 2.0_f32.powf(-20.0 + i as f32 * 20.0 / 256.0)));
-    // Include both sides of the join and a dense highlight ramp.
-    ramp.extend([0.1798, 0.18, 0.1802]);
-    ramp.extend((1..=256).map(|i| 0.18 * 2.0_f32.powf(i as f32 * 18.0 / 256.0)));
-    ramp.sort_by(f32::total_cmp);
-    let input: Vec<_> = ramp.iter().flat_map(|&x| [x, x, x, 1.0]).collect();
-    for linear_slope in [0.1, 1.0, 4.0] {
-        for headroom in [1.0, 4.0, 64.0] {
-            let source = LinearLogSigmoidParameters {
-                linear_slope,
-                ..LinearLogSigmoidParameters::default()
-            };
-            let mut parameters = Parameters::new(ramp.len() as u32, 1);
-            parameters.set_linear_log_sigmoid_for_headroom(source, headroom);
-            let scalar = gpu.render(&scalar_pipeline, parameters, &input);
-            let output = gpu.render(&pipeline, parameters, &input);
-            let mut original = parameters;
-            original.set_log_sigmoid_for_headroom(
-                LogSigmoidParameters::original_rgb_reference(),
-                headroom,
-            );
-            let mut previous = 0.0;
-            for ((&x, pixel), raw) in ramp
-                .iter()
-                .zip(output.as_chunks::<4>().0)
-                .zip(scalar.as_chunks::<4>().0)
-            {
-                let x = half::f16::from_f32(x).to_f32();
-                assert!(pixel.iter().all(|v| v.is_finite()));
-                assert!(
-                    pixel[0] >= previous,
-                    "non-monotonic at {x}: {previous} -> {}",
-                    pixel[0]
-                );
-                previous = pixel[0];
-                if x <= 0.18 {
-                    let expected = extended_srgb_oetf(linear_slope * x);
-                    // Input/output storage is fp16; the AP0 matrix is approximately neutral.
-                    for value in [&pixel[..3], &raw[..3]].into_iter().flatten() {
-                        assert!(
-                            (value - expected).abs() <= expected * 0.002 + 1.0e-7,
-                            "linear gain {linear_slope}, headroom {headroom}, x {x}: expected {expected}, got {value}"
-                        );
-                    }
-                    if x == 0.0 {
-                        assert_color(pixel, [0.0; 3]);
-                    } else {
-                        assert!(pixel[0] > 0.0, "finite black floor at {x}");
-                    }
-                } else if linear_slope == 1.0 {
-                    // Compare the new shader shoulder with the previous default tone scale.
-                    let distance = ((x.log2() - original.log_sigmoid_minimum_log2)
-                        * original.log_sigmoid_inverse_dynamic_range)
-                        .min(original.log_sigmoid_maximum_log_coordinate)
-                        - original.log_sigmoid_input_pivot;
-                    let expected = original.log_sigmoid_output_pivot
-                        + original.log_sigmoid_pivot_slope
-                            * distance
-                            * (1.0
-                                + original.sigmoid_shoulder_coefficient
-                                    * distance.powf(original.sigmoid_shoulder_power))
-                            .powf(-1.0 / original.sigmoid_shoulder_power);
-                    assert!(
-                        (raw[0] - expected).abs() <= expected * 0.001 + 1.0e-6,
-                        "original shoulder, headroom {headroom}, x {x}: expected {expected}, got {}",
-                        raw[0]
-                    );
-                }
-            }
-        }
-    }
-}
-
-#[test]
-#[ignore = "requires a GPU; run with --ignored --nocapture"]
-fn oklab_log_sigmoid_matches_the_rgb_neutral_curve() {
-    let gpu = TestGpu::new();
-    let oklab = create_pipeline(
-        &gpu.device,
-        &gpu.layout,
-        BUILT_OKLAB_LOG_SIGMOID_SHADER,
-        "Oklab log sigmoid",
-    )
-    .unwrap();
-    let rgb = create_pipeline(
-        &gpu.device,
-        &gpu.layout,
-        BUILT_RGB_LOG_SIGMOID_SHADER,
-        "RGB log sigmoid",
-    )
-    .unwrap();
-    let mut ramp = vec![0.0];
-    ramp.extend((0..=512).map(|i| 0.18 * 2.0_f32.powf(-20.0 + i as f32 * 38.0 / 512.0)));
-    ramp.extend([0.1798, 0.18, 0.1802]);
-    ramp.sort_by(f32::total_cmp);
-    let input: Vec<_> = ramp.iter().flat_map(|&x| [x, x, x, 1.0]).collect();
-    for linear_slope in [0.1, 1.0, 4.0] {
-        for compression_start in [0.0, 0.18, 10.0] {
-            for (highlight_ev, shoulder_power) in [(1.0, 1.0), (6.5, 5.2), (20.0, 8.0)] {
-                let mut source = LinearLogSigmoidParameters {
-                    linear_slope,
-                    compression_start,
-                    highlight_ev,
-                    shoulder_power,
-                    ..LinearLogSigmoidParameters::default()
-                };
-                source.constrain();
-                let mut parameters = Parameters::new(ramp.len() as u32, 1);
-                parameters.set_linear_log_sigmoid_for_headroom(source, 1.0);
-                let output = gpu.render(&oklab, parameters, &input);
-                let reference = gpu.render(&rgb, parameters, &input);
-                let mut previous = 0.0;
-                for ((&x, pixel), expected) in ramp
-                    .iter()
-                    .zip(output.as_chunks::<4>().0)
-                    .zip(reference.as_chunks::<4>().0)
-                {
-                    assert!(
-                        pixel
-                            .iter()
-                            .all(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0)
-                    );
-                    assert!(
-                        pixel[0] >= previous,
-                        "non-monotonic at {x}: {previous} -> {}",
-                        pixel[0]
-                    );
-                    previous = pixel[0];
-                    for channel in 0..3 {
-                        // Account for fp16 storage and the existing 0.99999 gamut margin.
-                        assert!(
-                            (pixel[channel] - expected[channel]).abs()
-                                < expected[channel] * 0.003 + 2.0e-7,
-                            "{source:?}, x {x}: Oklab {pixel:?}, RGB {expected:?}"
-                        );
-                    }
-                    if x == 0.0 {
-                        assert_eq!(&pixel[..3], &[0.0; 3]);
-                    } else if x < source.compression_start {
-                        assert!(pixel[0] > 0.0, "finite black floor at {x}");
-                        let linear =
-                            extended_srgb_oetf(linear_slope * half::f16::from_f32(x).to_f32());
-                        assert!(
-                            (pixel[0] - linear).abs() < linear * 0.003 + 2.0e-7,
-                            "{source:?}, x {x}: expected linear {linear}, got {pixel:?}"
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[test]
-#[ignore = "requires a GPU; run with --ignored --nocapture"]
-fn rgb_gamut_controls_change_colors_and_preserve_neutrals() {
-    let gpu = TestGpu::new();
-    let image = crate::image_io::test_pattern(63, 9);
-    for (name, shader) in [
-        ("RGB Reinhard", BUILT_RGB_REINHARD_SHADER),
-        ("RGB Log Sigmoid", BUILT_RGB_LOG_SIGMOID_SHADER),
-    ] {
-        let pipeline = create_pipeline(&gpu.device, &gpu.layout, shader, name).unwrap();
-        for headroom in [1.0, 64.0] {
-            let outputs: Vec<_> = [0.0, 0.04, 0.8]
-                .into_iter()
-                .map(|gamut_compression| {
-                    let mut parameters = Parameters::new(image.width, image.height);
-                    parameters.set_reinhard_for_headroom(
-                        ReinhardParameters {
-                            compression_start: 0.3,
-                            gamut_compression,
-                            ..ReinhardParameters::default()
-                        },
-                        headroom,
-                    );
-                    parameters.set_linear_log_sigmoid_for_headroom(
-                        LinearLogSigmoidParameters {
-                            compression_start: 0.3,
-                            gamut_compression,
-                            ..LinearLogSigmoidParameters::default()
-                        },
-                        headroom,
-                    );
-                    gpu.render(&pipeline, parameters, &image.rgba)
-                })
-                .collect();
-            for pair in outputs.windows(2) {
-                assert!(
-                    pair[1]
-                        .iter()
-                        .all(|value| value.is_finite() && *value >= 0.0)
-                );
-                let gray_end = image.width as usize * 4;
-                for (before, after) in pair[0][..gray_end].iter().zip(&pair[1][..gray_end]) {
-                    assert!(
-                        (before - after).abs() < before * 0.003 + 2.0e-7,
-                        "{name}, headroom {headroom}: neutral changed from {before} to {after}"
-                    );
-                }
-                let color_difference = pair[0][gray_end..]
-                    .iter()
-                    .zip(&pair[1][gray_end..])
-                    .map(|(before, after)| (before - after).abs())
-                    .fold(0.0_f32, f32::max);
-                assert!(
-                    color_difference > 0.01,
-                    "{name}: gamut slider has no visible effect"
-                );
-            }
-        }
-    }
-}
-
-#[test]
-#[ignore = "requires a GPU; run with --ignored --nocapture"]
-fn rgb_log_sigmoid_hue_retention_is_uniform_across_brightness() {
-    let gpu = TestGpu::new();
-    // Exercise the production hue repair on a known wrap-around hue pair.
-    // H=0.98 -> H=0.02 has midpoint red; S=0.6 and V must stay unchanged.
-    let shader = BUILT_RGB_LOG_SIGMOID_SHADER.replace(
-        "let mapped: vec3f = adjustHsv(originalLinear, rgbLogSigmoid(originalLinear));",
-        "let mapped: vec3f = adjustHsv(\n\
-            pow(hsvToRgb(vec3f(0.02, 0.6, 0.7)), vec3f(2.2)),\n\
-            hsvToRgb(vec3f(0.98, 0.6, ap0.x)));",
-    );
-    assert_ne!(shader, BUILT_RGB_LOG_SIGMOID_SHADER);
-    let pipeline =
-        create_pipeline(&gpu.device, &gpu.layout, &shader, "uniform hue repair").unwrap();
-    for headroom in [1.0, 64.0] {
-        let values = if headroom == 1.0 {
-            vec![0.0, 0.01, 0.1, 0.5, 1.0]
-        } else {
-            vec![0.0, 0.01, 0.1, 0.5, 1.0, 2.0, 4.0]
-        };
-        let input: Vec<_> = values.iter().flat_map(|&v| [v, v, v, 1.0]).collect();
-        let mut parameters = Parameters::new(values.len() as u32, 1);
-        parameters.set_log_sigmoid_for_headroom(
-            LinearLogSigmoidParameters::default().tone_scale(),
-            headroom,
-        );
-        for (retention, rgb_ratios) in [
-            (0.0, [1.0, 0.4, 0.472]),
-            (0.5, [1.0, 0.4, 0.4]),
-            (1.0, [1.0, 0.472, 0.4]),
+    for headroom in [1.0, 4.0, 64.0] {
+        for source in [
+            ReinhardParameters::default(),
+            ReinhardParameters {
+                linear_slope: 1.5,
+                compression_start: 0.3,
+                highlight_reach_ev: 12.0,
+                gamut_compression: 0.8,
+                hue_retention: 1.0,
+            },
         ] {
-            parameters.rgb_log_sigmoid_hue_retention = retention;
+            let curve = source.curve_for_headroom(headroom);
+            let reach_input = 0.18 * 2.0_f32.powf(curve.highlight_reach_ev);
+            let values = [
+                0.0,
+                0.000_1,
+                0.01,
+                source.compression_start * 0.99,
+                source.compression_start,
+                source.compression_start * 1.01,
+                1.0,
+                reach_input,
+                reach_input * 2.0,
+            ];
+            // Match the source texture's finite fp16 domain even for HDR reach.
+            let input: Vec<_> = values
+                .into_iter()
+                .flat_map(|value| [value / 256.0, value / 256.0, value / 256.0, 1.0])
+                .collect();
+            let mut parameters = Parameters::new(values.len() as u32, 1);
+            parameters.set_reinhard_for_headroom(source, headroom);
+            parameters.exposure_multiplier = 256.0;
             let output = gpu.render(&pipeline, parameters, &input);
-            for (&value, pixel) in values.iter().zip(output.as_chunks::<4>().0) {
-                let value = half::f16::from_f32(value).to_f32();
-                for channel in 0..3 {
-                    let expected = value * rgb_ratios[channel];
-                    assert!(
-                        (pixel[channel] - expected).abs() < value * 0.001 + 1.0e-7,
-                        "retention {retention}, V {value}, headroom {headroom}: expected {expected}, got {}",
-                        pixel[channel]
-                    );
-                }
-            }
-        }
-    }
-}
-
-#[test]
-#[ignore = "requires a GPU; run with --ignored --nocapture"]
-fn oklab_chroma_controls_preserve_defaults_and_neutral_axis() {
-    let gpu = TestGpu::new();
-    let image = crate::image_io::test_pattern(127, 17);
-    for (kind, shader) in [
-        (DrtKind::OklabReinhard, BUILT_OKLAB_REINHARD_SHADER),
-        (DrtKind::OklabLogSigmoid, BUILT_OKLAB_LOG_SIGMOID_SHADER),
-    ] {
-        // Inspect pre-clamp linear output so a diagnostic color or display clamp
-        // cannot conceal a broken gamut boundary at the new slider limits.
-        let raw_shader = shader.replace(
-            "vec4f(prepareOutput(ap0, mapped), 1.0)",
-            "vec4f(mapped, 1.0)",
-        );
-        assert_ne!(raw_shader, shader);
-        let pipeline =
-            create_pipeline(&gpu.device, &gpu.layout, &raw_shader, kind.label()).unwrap();
-        let mut parameters = Parameters::new(image.width, image.height);
-        parameters.set_reinhard_for_headroom(ReinhardParameters::oklab_default(), 1.0);
-        parameters.set_linear_log_sigmoid_for_headroom(LinearLogSigmoidParameters::default(), 1.0);
-        let original = gpu.render(&pipeline, parameters, &image.rgba);
-
-        // Original hard-coded Oklab expressions, before exposing the controls.
-        let legacy_shader = raw_shader
-            .replace("return 1.0 - pow(clamp(lightness, 0.0, 1.0), parameters.oklabHighlightChromaPower);",
-                "let l2 = lightness * lightness; let l4 = l2 * l2; let l8 = l4 * l4; return 1.0 - l8 * l4;")
-            .replace("return mix(parameters.oklabEndpointCompressionPower, parameters.oklabMidtoneCompressionPower, midtoneWeight);",
-                "return 32.0 - 256.0 * endpointDistance * endpointDistance;")
-            .replace("softMin(blackChroma, whiteChroma, parameters.oklabGamutRoundingPower)",
-                "legacySoftMin4(blackChroma, whiteChroma)");
-        let legacy_shader = format!(
-            "{legacy_shader}\n{}",
-            r#"
-            fn legacySoftMin4(value: f32, limit: f32) -> f32 {
-                if (value <= 0.0 || limit <= 0.0) { return 0.0; }
-                let lower = min(value, limit);
-                let ratio = lower / max(value, limit);
-                let ratio2 = ratio * ratio;
-                return lower * inverseSqrt(sqrt(1.0 + ratio2 * ratio2));
-            }
-        "#
-        );
-        let legacy = create_pipeline(
-            &gpu.device,
-            &gpu.layout,
-            &legacy_shader,
-            "legacy Oklab chroma",
-        )
-        .unwrap();
-        let reference = gpu.render(&legacy, parameters, &image.rgba);
-        assert!(
-            original
+            for (pixel, upload) in output
+                .as_chunks::<4>()
+                .0
                 .iter()
-                .zip(reference)
-                .all(|(a, b)| (a - b).abs() < 0.002)
-        );
-
-        for control in 0..4 {
-            for upper in [false, true] {
-                let mut source = OklabChromaParameters::default();
-                match control {
-                    0 => source.highlight_chroma_power = if upper { 32.0 } else { 1.0 },
-                    1 => source.gamut_rounding_power = if upper { 8.0 } else { 1.0 },
-                    2 => source.endpoint_compression_power = if upper { 64.0 } else { 1.0 },
-                    _ => source.midtone_compression_power = if upper { 64.0 } else { 1.0 },
-                }
-                parameters.set_oklab_chroma(source);
-                let output = gpu.render(&pipeline, parameters, &image.rgba);
-                // Reinhard intentionally permits neutral overexposure up to its
-                // asymptote before the final display clamp.
-                let upper_bound = if kind == DrtKind::OklabReinhard {
-                    parameters.linear_curve_peak + 0.001
-                } else {
-                    1.001
-                };
+                .zip(input.as_chunks::<4>().0)
+            {
+                let value = half::f16::from_f32(upload[0]).to_f32() * 256.0;
+                let expected = extended_srgb_oetf(curve.map_linear(value).clamp(0.0, headroom));
                 assert!(
-                    output
+                    pixel[..3]
                         .iter()
-                        .all(|v| v.is_finite() && *v >= -0.001 && *v <= upper_bound),
-                    "{} invalid gamut output with {source:?}: min {}, max {}",
-                    kind.label(),
-                    output.iter().copied().fold(f32::INFINITY, f32::min),
-                    output.iter().copied().fold(f32::NEG_INFINITY, f32::max)
-                );
-                let neutral_end = image.width as usize * 4;
-                assert!(
-                    output[..neutral_end]
-                        .iter()
-                        .zip(&original[..neutral_end])
-                        .all(|(a, b)| (a - b).abs() < 0.001)
-                );
-                assert!(
-                    output[neutral_end..]
-                        .iter()
-                        .zip(&original[neutral_end..])
-                        .any(|(a, b)| (a - b).abs() > 0.001),
-                    "{} control {control} had no visible effect",
-                    kind.label()
+                        .all(|channel| (channel - expected).abs() < 0.003 * headroom.cbrt()),
+                    "RGB Reinhard peak {headroom}, input {value}: {pixel:?} versus {expected}"
                 );
             }
+            let at_reach = output.as_chunks::<4>().0[7];
+            assert!((at_reach[0] - extended_srgb_oetf(headroom)).abs() < 0.003 * headroom.cbrt());
         }
     }
 }
@@ -1048,42 +687,20 @@ fn drt_gpu_hot_reload_recovers() {
         .unwrap();
     }
     let image = crate::image_io::test_pattern(drt.width(), drt.height());
-    // The new Oklab curve has its own parameters and keeps the SDR boundary.
-    let oklab_sigmoid = LinearLogSigmoidParameters {
+    let oklab_aces = crate::oklab_aces::OklabAcesParameters {
         linear_slope: 1.5,
         compression_start: 0.3,
-        highlight_ev: 8.0,
-        shoulder_power: 2.25,
-        ..LinearLogSigmoidParameters::default()
+        shoulder_power: 0.75,
     };
-    let oklab_chroma = OklabChromaParameters {
-        highlight_chroma_power: 8.0,
-        gamut_rounding_power: 2.0,
-        endpoint_compression_power: 24.0,
-        midtone_compression_power: 12.0,
-    };
-    drt.set_oklab_chroma_parameters(DrtKind::OklabLogSigmoid, oklab_chroma);
-    drt.set_oklab_log_sigmoid_parameters(oklab_sigmoid);
-    drt.set_drt(DrtKind::OklabLogSigmoid);
-    let oklab_sigmoid_output = gpu.render(
-        drt.pipelines.get(DrtKind::OklabLogSigmoid),
-        drt.parameters,
-        &image.rgba,
-    );
-    drt.set_oklab_chroma_parameters(
-        DrtKind::OklabReinhard,
-        OklabChromaParameters {
-            highlight_chroma_power: 20.0,
-            ..OklabChromaParameters::default()
-        },
-    );
-    drt.set_rgb_log_sigmoid_parameters(LinearLogSigmoidParameters {
+    let rgb_reinhard = ReinhardParameters {
         linear_slope: 0.4,
         compression_start: 0.5,
         gamut_compression: 0.25,
-        highlight_ev: 12.0,
-        shoulder_power: 7.0,
-    });
+        highlight_reach_ev: 12.0,
+        hue_retention: 0.75,
+    };
+    drt.set_oklab_aces_parameters(oklab_aces);
+    drt.set_rgb_reinhard_parameters(rgb_reinhard);
     for headroom in [1.0, 4.0, 64.0] {
         for kind in DrtKind::ALL {
             drt.set_drt(kind);
@@ -1091,30 +708,23 @@ fn drt_gpu_hot_reload_recovers() {
             let expected_range = if kind.supports_hdr() { headroom } else { 1.0 };
             assert_eq!(drt.active_output_headroom(), expected_range);
         }
-        drt.set_drt(DrtKind::OklabLogSigmoid);
-        assert_eq!(drt.oklab_log_sigmoid_parameters, oklab_sigmoid);
-        assert_eq!(drt.oklab_log_sigmoid_chroma, oklab_chroma);
-        assert_eq!(
-            drt.parameters.oklab_highlight_chroma_power,
-            oklab_chroma.highlight_chroma_power
-        );
-        assert_eq!(drt.parameters.log_sigmoid_output_peak, 1.0);
-        assert_eq!(
-            gpu.render(
-                drt.pipelines.get(DrtKind::OklabLogSigmoid),
-                drt.parameters,
-                &image.rgba
-            ),
-            oklab_sigmoid_output
-        );
+        for kind in DrtKind::RESEARCH {
+            drt.set_drt(kind);
+            assert_eq!(drt.oklab_aces_parameters, oklab_aces);
+            assert_eq!(drt.rgb_reinhard_parameters, rgb_reinhard);
+            let mut expected = Parameters::new(image.width, image.height);
+            expected.set_reinhard_for_drt(kind, rgb_reinhard, headroom);
+            if kind == DrtKind::OklabAces {
+                expected.set_oklab_aces_for_headroom(oklab_aces, headroom);
+            }
+            assert_eq!(
+                gpu.render(drt.pipelines.get(kind), drt.parameters, &image.rgba),
+                gpu.render(drt.pipelines.get(kind), expected, &image.rgba),
+                "saved controls changed for {} at peak {headroom}",
+                kind.label()
+            );
+        }
     }
-    drt.set_drt(DrtKind::RgbLogSigmoid);
-    assert_eq!(
-        drt.parameters.log_sigmoid_output_pivot,
-        extended_srgb_oetf(0.5 * 0.4)
-    );
-    assert_eq!(drt.parameters.log_sigmoid_gamut_compression, 0.25);
-    assert!(drt.parameters.log_sigmoid_output_peak > 1.0);
     drt.set_hdr_headroom(1.0);
     drt.set_drt(DrtKind::RgbReinhard);
     let input = [0.18, 0.18, 0.18, 1.0];
@@ -1155,6 +765,3 @@ fn drt_gpu_hot_reload_recovers() {
 }
 
 include!("oklab_aces_validation.rs");
-include!("oklab_neutral_validation.rs");
-include!("oklab_bezier_validation.rs");
-include!("aces_curve_validation.rs");

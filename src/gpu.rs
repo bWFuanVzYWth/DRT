@@ -11,32 +11,22 @@ use crate::{
     tone_curve::{INPUT_MAX_EV, INPUT_MIN_EV, SAMPLE_COUNT, ToneCurveRenderer},
 };
 
-const BUILT_OKLAB_REINHARD_SHADER: &str = include_str!("../shaders/research/oklab_reinhard.wgsl");
-const BUILT_OKLAB_LOG_SIGMOID_SHADER: &str =
-    include_str!("../shaders/research/oklab_log_sigmoid.wgsl");
 const BUILT_OKLAB_ACES_SHADER: &str = include_str!("../shaders/research/oklab_aces.wgsl");
-const BUILT_OKLAB_NEUTRAL_SHADER: &str = include_str!("../shaders/research/oklab_neutral.wgsl");
 const BUILT_AGX_S2O3_SHADER: &str = include_str!("../shaders/reference/agx_s2o3.wgsl");
-const BUILT_RGB_LOG_SIGMOID_SHADER: &str = include_str!("../shaders/research/rgb_log_sigmoid.wgsl");
 const BUILT_RGB_REINHARD_SHADER: &str = include_str!("../shaders/research/rgb_reinhard.wgsl");
 pub const DEFAULT_COMPRESSION_START: f32 = 0.18;
 pub const DEFAULT_GAMUT_COMPRESSION: f32 = 0.04;
 
-const BUILT_NONE_SHADER: &str = include_str!("../shaders/research/none_drt.wgsl");
+const BUILT_NONE_SHADER: &str = include_str!("../shaders/none_drt.wgsl");
 
 pub use crate::drt::DrtKind;
 pub use crate::oklab_aces::OklabAcesParameters;
-pub use crate::oklab_neutral::OklabNeutralParameters;
 
 pub(crate) fn builtin_shader(kind: DrtKind) -> String {
     let legacy = match kind {
         DrtKind::None => Some(BUILT_NONE_SHADER),
         DrtKind::AgxS2O3 => Some(BUILT_AGX_S2O3_SHADER),
-        DrtKind::OklabReinhard => Some(BUILT_OKLAB_REINHARD_SHADER),
-        DrtKind::OklabLogSigmoid => Some(BUILT_OKLAB_LOG_SIGMOID_SHADER),
         DrtKind::OklabAces => Some(BUILT_OKLAB_ACES_SHADER),
-        DrtKind::OklabNeutral => Some(BUILT_OKLAB_NEUTRAL_SHADER),
-        DrtKind::RgbLogSigmoid => Some(BUILT_RGB_LOG_SIGMOID_SHADER),
         DrtKind::RgbReinhard => Some(BUILT_RGB_REINHARD_SHADER),
         _ => None,
     };
@@ -106,16 +96,6 @@ impl Default for ReinhardParameters {
 }
 
 impl ReinhardParameters {
-    pub const fn oklab_default() -> Self {
-        Self {
-            linear_slope: 1.0,
-            compression_start: DEFAULT_COMPRESSION_START,
-            gamut_compression: DEFAULT_GAMUT_COMPRESSION,
-            highlight_reach_ev: 6.5,
-            hue_retention: 0.5,
-        }
-    }
-
     pub fn constrain(&mut self) {
         self.linear_slope = self.linear_slope.clamp(0.1, 4.0);
         self.compression_start = self
@@ -165,7 +145,6 @@ impl ReinhardParameters {
 }
 
 /// Full log-domain toe/shoulder controls for the AgX-S2O3 reference port.
-/// RGB Log Sigmoid derives its compatible shoulder coefficients from a linear segment.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LogSigmoidParameters {
     pub shadow_ev: f32,
@@ -196,27 +175,6 @@ impl LogSigmoidParameters {
         }
     }
 
-    // Former RGB toe/shoulder defaults, retained to verify the unchanged shoulder.
-    #[cfg(test)]
-    pub const fn original_rgb_reference() -> Self {
-        Self {
-            shadow_ev: -10.0,
-            highlight_ev: 6.5,
-            // IEC sRGB OETF(0.18): preserves scene-linear 18% gray on display.
-            output_pivot: 0.461_356_13,
-            // Matches the local None slope for the default 16.5-stop allocation.
-            pivot_slope: 2.460_636_6,
-            // Least-squares fit to the None neutral ramp over the visible shadows.
-            toe_power: 1.55,
-            // TODO: Known issue: the per-channel shoulder can create perceptual
-            // banding across high-to-low-saturation highlight transitions. 5.2 is
-            // the accepted artistic compromise until the color trajectory is
-            // redesigned independently from the tone curve.
-            shoulder_power: 5.2,
-            gamut_compression: 0.05,
-        }
-    }
-
     pub fn input_pivot(self) -> f32 {
         -self.shadow_ev / (self.highlight_ev - self.shadow_ev)
     }
@@ -224,10 +182,6 @@ impl LogSigmoidParameters {
     pub fn minimum_pivot_slope(self) -> f32 {
         let input_pivot = self.input_pivot();
         (self.output_pivot / input_pivot).max((1.0 - self.output_pivot) / (1.0 - input_pivot))
-    }
-
-    pub fn output_highlight_ev(self, output_peak: f32) -> f32 {
-        self.highlight_ev * (output_peak - self.output_pivot) / (1.0 - self.output_pivot)
     }
 
     pub fn constrain(&mut self) {
@@ -241,133 +195,6 @@ impl LogSigmoidParameters {
             .pivot_slope
             .max(self.minimum_pivot_slope() + 1.0e-3)
             .min(32.0);
-    }
-}
-
-/// Shared encoded linear-light segment joined tangentially to a log2 sigmoid.
-/// Highlight reach stays referenced to scene 18% gray as the join moves.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct LinearLogSigmoidParameters {
-    pub linear_slope: f32,
-    pub compression_start: f32,
-    pub gamut_compression: f32,
-    pub highlight_ev: f32,
-    pub shoulder_power: f32,
-}
-
-impl Default for LinearLogSigmoidParameters {
-    fn default() -> Self {
-        Self {
-            linear_slope: 1.0,
-            compression_start: DEFAULT_COMPRESSION_START,
-            gamut_compression: DEFAULT_GAMUT_COMPRESSION,
-            highlight_ev: 6.5,
-            shoulder_power: 5.2,
-        }
-    }
-}
-
-impl LinearLogSigmoidParameters {
-    fn required_highlight_ev(self, start: f32) -> f32 {
-        let output = start * self.linear_slope.clamp(0.1, 4.0);
-        // The shoulder must rise less than its initial tangent over this reach.
-        (start / 0.18).log2() + (1.0 - extended_srgb_oetf(output)) / srgb_log_tangent(output) + 0.1
-    }
-
-    pub fn maximum_compression_start(self) -> f32 {
-        0.99 / self.linear_slope.clamp(0.1, 4.0)
-    }
-
-    pub fn minimum_compression_start(self) -> f32 {
-        // A zero log-domain join is undefined. Solve the lowest positive join
-        // compatible with the 20 EV reach limit, leaving a rounding margin.
-        let mut low = 1.0e-6;
-        let mut high = self.maximum_compression_start();
-        for _ in 0..24 {
-            let middle = (low + high) * 0.5;
-            if self.required_highlight_ev(middle) > 19.9 {
-                low = middle;
-            } else {
-                high = middle;
-            }
-        }
-        high
-    }
-
-    pub fn minimum_highlight_ev(self) -> f32 {
-        self.required_highlight_ev(self.compression_start).max(1.0)
-    }
-
-    pub fn constrain(&mut self) {
-        self.linear_slope = self.linear_slope.clamp(0.1, 4.0);
-        self.compression_start = self.compression_start.clamp(
-            self.minimum_compression_start(),
-            self.maximum_compression_start(),
-        );
-        self.gamut_compression = self.gamut_compression.clamp(0.0, 0.8);
-        self.highlight_ev = self.highlight_ev.clamp(self.minimum_highlight_ev(), 20.0);
-        self.shoulder_power = self.shoulder_power.clamp(1.0, 8.0);
-    }
-
-    pub fn tone_scale(mut self) -> LogSigmoidParameters {
-        self.constrain();
-        let output_join = self.compression_start * self.linear_slope;
-        let relative_reach = self.highlight_ev - (self.compression_start / 0.18).log2();
-        // The coordinate origin is ten stops below the join, never a black floor.
-        let shadow_ev = -10.0;
-        LogSigmoidParameters {
-            shadow_ev,
-            highlight_ev: relative_reach,
-            output_pivot: extended_srgb_oetf(output_join),
-            pivot_slope: srgb_log_tangent(output_join) * (relative_reach - shadow_ev),
-            toe_power: 1.0, // Unused by the analytical linear segment.
-            shoulder_power: self.shoulder_power,
-            gamut_compression: self.gamut_compression,
-        }
-    }
-
-    pub fn output_highlight_ev(mut self, output_peak: f32) -> f32 {
-        self.constrain();
-        (self.compression_start / 0.18).log2() + self.tone_scale().output_highlight_ev(output_peak)
-    }
-}
-
-// d OETF(x) / d log2(x): the exact log-domain tangent of linear-light output.
-fn srgb_log_tangent(linear: f32) -> f32 {
-    let signal_tangent = if linear <= 0.003_130_8 {
-        12.92 * linear
-    } else {
-        (1.055 / 2.4) * linear.powf(1.0 / 2.4)
-    };
-    signal_tangent * std::f32::consts::LN_2
-}
-
-/// Existing Oklab color-shaping powers, shared by both Oklab transforms.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct OklabChromaParameters {
-    pub highlight_chroma_power: f32,
-    pub gamut_rounding_power: f32,
-    pub endpoint_compression_power: f32,
-    pub midtone_compression_power: f32,
-}
-
-impl Default for OklabChromaParameters {
-    fn default() -> Self {
-        Self {
-            highlight_chroma_power: 12.0,
-            gamut_rounding_power: 4.0,
-            endpoint_compression_power: 32.0,
-            midtone_compression_power: 16.0,
-        }
-    }
-}
-
-impl OklabChromaParameters {
-    pub fn constrain(&mut self) {
-        self.highlight_chroma_power = self.highlight_chroma_power.clamp(1.0, 32.0);
-        self.gamut_rounding_power = self.gamut_rounding_power.clamp(1.0, 8.0);
-        self.endpoint_compression_power = self.endpoint_compression_power.clamp(1.0, 64.0);
-        self.midtone_compression_power = self.midtone_compression_power.clamp(1.0, 64.0);
     }
 }
 
@@ -388,7 +215,8 @@ struct Parameters {
     log_sigmoid_gamut_compression: f32,
     log_sigmoid_toe_coefficient: f32,
     sigmoid_shoulder_coefficient: f32,
-    rgb_log_sigmoid_hue_retention: f32,
+    // Reserved former RGB hue slot; retained shaders keep its offset in the ABI.
+    reserved_rgb_hue_retention: f32,
     linear_compression_start: f32,
     log_sigmoid_maximum_log_coordinate: f32,
     log_sigmoid_output_peak: f32,
@@ -397,6 +225,7 @@ struct Parameters {
     linear_output_peak: f32,
     rgb_hue_retention: f32,
     linear_curve_peak: f32,
+    // Reserved legacy slots keep the retained shaders and reference prefix ABI stable.
     oklab_highlight_chroma_power: f32,
     oklab_gamut_rounding_power: f32,
     oklab_endpoint_compression_power: f32,
@@ -404,9 +233,6 @@ struct Parameters {
     oklab_aces_linear_slope: f32,
     oklab_aces_compression_start: f32,
     oklab_aces_shoulder_power: f32,
-    oklab_neutral_linear_slope: f32,
-    oklab_neutral_compression_start: f32,
-    oklab_neutral_shoulder_power: f32,
 }
 
 impl Parameters {
@@ -426,7 +252,7 @@ impl Parameters {
             log_sigmoid_gamut_compression: 0.0,
             log_sigmoid_toe_coefficient: 0.0,
             sigmoid_shoulder_coefficient: 0.0,
-            rgb_log_sigmoid_hue_retention: 0.5,
+            reserved_rgb_hue_retention: 0.0,
             linear_compression_start: DEFAULT_COMPRESSION_START,
             log_sigmoid_maximum_log_coordinate: 1.0,
             log_sigmoid_output_peak: 1.0,
@@ -442,13 +268,8 @@ impl Parameters {
             oklab_aces_linear_slope: 0.0,
             oklab_aces_compression_start: 0.0,
             oklab_aces_shoulder_power: 0.0,
-            oklab_neutral_linear_slope: 0.0,
-            oklab_neutral_compression_start: 0.0,
-            oklab_neutral_shoulder_power: 0.0,
         };
         parameters.set_oklab_aces_for_headroom(OklabAcesParameters::default(), 1.0);
-        parameters.set_oklab_neutral_for_headroom(OklabNeutralParameters::default(), 1.0);
-        parameters.set_oklab_chroma(OklabChromaParameters::default());
         parameters.set_log_sigmoid(LogSigmoidParameters::default());
         parameters.set_reinhard_for_headroom(ReinhardParameters::default(), 1.0);
         parameters
@@ -463,27 +284,6 @@ impl Parameters {
         self.linear_output_peak = curve.output_peak;
     }
 
-    fn set_oklab_neutral_for_headroom(
-        &mut self,
-        mut source: OklabNeutralParameters,
-        headroom: f32,
-    ) {
-        source.constrain();
-        let curve = source.curve_for_headroom(headroom);
-        self.oklab_neutral_linear_slope = curve.linear_slope;
-        self.oklab_neutral_compression_start = curve.compression_start;
-        self.oklab_neutral_shoulder_power = curve.shoulder_power;
-        self.linear_output_peak = curve.output_peak;
-    }
-
-    fn set_oklab_chroma(&mut self, mut source: OklabChromaParameters) {
-        source.constrain();
-        self.oklab_highlight_chroma_power = source.highlight_chroma_power;
-        self.oklab_gamut_rounding_power = source.gamut_rounding_power;
-        self.oklab_endpoint_compression_power = source.endpoint_compression_power;
-        self.oklab_midtone_compression_power = source.midtone_compression_power;
-    }
-
     fn set_log_sigmoid(&mut self, source: LogSigmoidParameters) {
         self.set_log_sigmoid_for_headroom(source, 1.0);
     }
@@ -491,19 +291,6 @@ impl Parameters {
     fn set_log_sigmoid_for_headroom(&mut self, mut source: LogSigmoidParameters, headroom: f32) {
         source.constrain();
         self.set_log_sigmoid_scale(source, headroom);
-    }
-
-    fn set_linear_log_sigmoid_for_headroom(
-        &mut self,
-        mut source: LinearLogSigmoidParameters,
-        headroom: f32,
-    ) {
-        source.constrain();
-        let scale = source.tone_scale();
-        // Reference-port constraints are not applicable to a movable analytic join.
-        self.set_log_sigmoid_scale(scale, headroom);
-        self.log_sigmoid_minimum_log2 = source.compression_start.log2() + scale.shadow_ev;
-        self.log_sigmoid_toe_coefficient = 0.0;
     }
 
     fn set_log_sigmoid_scale(&mut self, source: LogSigmoidParameters, headroom: f32) {
@@ -558,19 +345,8 @@ impl Parameters {
         self.linear_curve_peak = curve.curve_peak;
     }
 
-    fn set_reinhard_for_drt(
-        &mut self,
-        drt: DrtKind,
-        oklab: ReinhardParameters,
-        reinhard: ReinhardParameters,
-        headroom: f32,
-    ) {
-        let source = if drt == DrtKind::OklabReinhard {
-            oklab
-        } else {
-            reinhard
-        };
-        self.set_reinhard_for_headroom(source, direct_output_headroom(drt, headroom));
+    fn set_reinhard_for_drt(&mut self, drt: DrtKind, reinhard: ReinhardParameters, headroom: f32) {
+        self.set_reinhard_for_headroom(reinhard, direct_output_headroom(drt, headroom));
     }
 }
 
@@ -586,11 +362,7 @@ fn extended_srgb_oetf(linear: f32) -> f32 {
 }
 
 fn direct_output_headroom(drt: DrtKind, headroom: f32) -> f32 {
-    if drt.supports_hdr() && drt != DrtKind::RgbLogSigmoid {
-        headroom
-    } else {
-        1.0
-    }
+    if drt.supports_hdr() { headroom } else { 1.0 }
 }
 
 fn curve_coefficient(x_extent: f32, y_extent: f32, slope: f32, power: f32) -> f32 {
@@ -642,14 +414,7 @@ pub struct DrtGpu {
     curve: CurveResources,
     parameters: Parameters,
     agx_s2o3_parameters: LogSigmoidParameters,
-    rgb_log_sigmoid_parameters: LinearLogSigmoidParameters,
-    oklab_log_sigmoid_parameters: LinearLogSigmoidParameters,
     oklab_aces_parameters: OklabAcesParameters,
-    aces20_curve_parameters: OklabAcesParameters,
-    oklab_neutral_parameters: OklabNeutralParameters,
-    oklab_reinhard_parameters: ReinhardParameters,
-    oklab_reinhard_chroma: OklabChromaParameters,
-    oklab_log_sigmoid_chroma: OklabChromaParameters,
     rgb_reinhard_parameters: ReinhardParameters,
     hdr_headroom: f32,
     adapter_name: String,
@@ -693,8 +458,7 @@ impl DrtGpu {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let mut parameters = Parameters::new(image.width, image.height);
-        parameters.set_reinhard_for_headroom(ReinhardParameters::oklab_default(), 1.0);
+        let parameters = Parameters::new(image.width, image.height);
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("DRT parameters"),
             contents: bytemuck::bytes_of(&parameters),
@@ -731,7 +495,7 @@ impl DrtGpu {
             reference_resources,
             pipeline_layout,
             pipelines,
-            active_drt: DrtKind::OklabReinhard,
+            active_drt: DrtKind::OklabAces,
             comparison_drt: None,
             comparison: None,
             sampler,
@@ -741,14 +505,7 @@ impl DrtGpu {
             curve: curve_resources,
             parameters,
             agx_s2o3_parameters: LogSigmoidParameters::s2o3_reference(),
-            rgb_log_sigmoid_parameters: LinearLogSigmoidParameters::default(),
-            oklab_log_sigmoid_parameters: LinearLogSigmoidParameters::default(),
             oklab_aces_parameters: OklabAcesParameters::default(),
-            aces20_curve_parameters: OklabAcesParameters::default(),
-            oklab_neutral_parameters: OklabNeutralParameters::default(),
-            oklab_reinhard_parameters: ReinhardParameters::oklab_default(),
-            oklab_reinhard_chroma: OklabChromaParameters::default(),
-            oklab_log_sigmoid_chroma: OklabChromaParameters::default(),
             rgb_reinhard_parameters: ReinhardParameters::default(),
             hdr_headroom: 1.0,
             adapter_name: info.name,
@@ -819,58 +576,10 @@ impl DrtGpu {
         self.dispatch();
     }
 
-    pub fn set_rgb_log_sigmoid_parameters(&mut self, mut parameters: LinearLogSigmoidParameters) {
-        parameters.constrain();
-        self.rgb_log_sigmoid_parameters = parameters;
-        self.apply_log_sigmoid_parameters();
-        self.render_state.queue.write_buffer(
-            &self.uniform,
-            0,
-            bytemuck::bytes_of(&self.parameters),
-        );
-        self.dispatch();
-    }
-
-    pub fn set_oklab_log_sigmoid_parameters(&mut self, mut parameters: LinearLogSigmoidParameters) {
-        parameters.constrain();
-        self.oklab_log_sigmoid_parameters = parameters;
-        self.apply_log_sigmoid_parameters();
-        self.render_state.queue.write_buffer(
-            &self.uniform,
-            0,
-            bytemuck::bytes_of(&self.parameters),
-        );
-        self.dispatch();
-    }
-
     pub fn set_oklab_aces_parameters(&mut self, mut source: OklabAcesParameters) {
         source.constrain();
         self.oklab_aces_parameters = source;
         self.apply_oklab_aces_parameters();
-        self.render_state.queue.write_buffer(
-            &self.uniform,
-            0,
-            bytemuck::bytes_of(&self.parameters),
-        );
-        self.dispatch();
-    }
-
-    pub fn set_oklab_neutral_parameters(&mut self, mut source: OklabNeutralParameters) {
-        source.constrain();
-        self.oklab_neutral_parameters = source;
-        self.apply_oklab_neutral_parameters();
-        self.render_state.queue.write_buffer(
-            &self.uniform,
-            0,
-            bytemuck::bytes_of(&self.parameters),
-        );
-        self.dispatch();
-    }
-
-    pub fn set_aces20_curve_parameters(&mut self, mut source: OklabAcesParameters) {
-        source.constrain();
-        self.aces20_curve_parameters = source;
-        self.apply_aces20_curve_parameters();
         self.render_state.queue.write_buffer(
             &self.uniform,
             0,
@@ -896,48 +605,10 @@ impl DrtGpu {
         self.dispatch();
     }
 
-    pub fn set_rgb_log_sigmoid_hue_retention(&mut self, amount: f32) {
-        self.parameters.rgb_log_sigmoid_hue_retention = amount.clamp(0.0, 1.0);
-        self.render_state.queue.write_buffer(
-            &self.uniform,
-            0,
-            bytemuck::bytes_of(&self.parameters),
-        );
-        self.dispatch();
-    }
-
     pub fn set_rgb_reinhard_parameters(&mut self, mut source: ReinhardParameters) {
         source.constrain();
         self.rgb_reinhard_parameters = source;
         self.apply_reinhard_parameters();
-        self.render_state.queue.write_buffer(
-            &self.uniform,
-            0,
-            bytemuck::bytes_of(&self.parameters),
-        );
-        self.dispatch();
-    }
-
-    pub fn set_oklab_reinhard_parameters(&mut self, mut source: ReinhardParameters) {
-        source.constrain();
-        self.oklab_reinhard_parameters = source;
-        self.apply_reinhard_parameters();
-        self.render_state.queue.write_buffer(
-            &self.uniform,
-            0,
-            bytemuck::bytes_of(&self.parameters),
-        );
-        self.dispatch();
-    }
-
-    pub fn set_oklab_chroma_parameters(&mut self, drt: DrtKind, mut source: OklabChromaParameters) {
-        source.constrain();
-        match drt {
-            DrtKind::OklabReinhard => self.oklab_reinhard_chroma = source,
-            DrtKind::OklabLogSigmoid => self.oklab_log_sigmoid_chroma = source,
-            _ => return,
-        }
-        self.apply_oklab_chroma_parameters();
         self.render_state.queue.write_buffer(
             &self.uniform,
             0,
@@ -959,7 +630,6 @@ impl DrtGpu {
     pub fn set_drt(&mut self, drt: DrtKind) {
         if self.active_drt != drt {
             self.active_drt = drt;
-            self.apply_oklab_chroma_parameters();
             self.apply_log_sigmoid_parameters();
             self.apply_reinhard_parameters();
             self.render_state.queue.write_buffer(
@@ -1061,40 +731,18 @@ impl DrtGpu {
         }
     }
 
-    fn apply_oklab_chroma_parameters(&mut self) {
-        let source = match self.active_drt {
-            DrtKind::OklabReinhard => self.oklab_reinhard_chroma,
-            DrtKind::OklabLogSigmoid => self.oklab_log_sigmoid_chroma,
-            _ => return,
-        };
-        self.parameters.set_oklab_chroma(source);
-    }
-
     fn apply_log_sigmoid_parameters(&mut self) {
-        match self.active_drt {
-            DrtKind::RgbLogSigmoid => self.parameters.set_linear_log_sigmoid_for_headroom(
-                self.rgb_log_sigmoid_parameters,
-                self.hdr_headroom,
-            ),
-            DrtKind::OklabLogSigmoid => self
-                .parameters
-                .set_linear_log_sigmoid_for_headroom(self.oklab_log_sigmoid_parameters, 1.0),
-            _ => self
-                .parameters
-                .set_log_sigmoid_for_headroom(self.agx_s2o3_parameters, 1.0),
-        }
+        self.parameters
+            .set_log_sigmoid_for_headroom(self.agx_s2o3_parameters, 1.0);
     }
 
     fn apply_reinhard_parameters(&mut self) {
         self.parameters.set_reinhard_for_drt(
             self.active_drt,
-            self.oklab_reinhard_parameters,
             self.rgb_reinhard_parameters,
             self.hdr_headroom,
         );
         self.apply_oklab_aces_parameters();
-        self.apply_oklab_neutral_parameters();
-        self.apply_aces20_curve_parameters();
     }
 
     fn apply_oklab_aces_parameters(&mut self) {
@@ -1104,66 +752,20 @@ impl DrtGpu {
         }
     }
 
-    fn apply_oklab_neutral_parameters(&mut self) {
-        if self.active_drt == DrtKind::OklabNeutral {
-            self.parameters
-                .set_oklab_neutral_for_headroom(self.oklab_neutral_parameters, self.hdr_headroom);
-        }
-    }
-
-    fn apply_aces20_curve_parameters(&mut self) {
-        if self.active_drt == DrtKind::Aces20Curve {
-            // Reuse the existing three scalar-curve fields; the saved controls
-            // remain independent from the Oklab ACES-inspired experiment.
-            self.parameters
-                .set_oklab_aces_for_headroom(self.aces20_curve_parameters, self.hdr_headroom);
-        }
-    }
-
     fn parameters_for_drt(&self, drt: DrtKind) -> Parameters {
-        // Exposure, anomaly display, dimensions, and RGB hue retention are
-        // shared. Each side takes its curve and chroma values from that DRT's
-        // saved controls, without changing the active side's parameters.
+        // Both sides share exposure, anomaly display, and image dimensions.
+        // Each side loads its DRT's saved controls independently.
         let mut parameters = self.parameters;
-        match drt {
-            DrtKind::OklabReinhard => parameters.set_oklab_chroma(self.oklab_reinhard_chroma),
-            DrtKind::OklabLogSigmoid => parameters.set_oklab_chroma(self.oklab_log_sigmoid_chroma),
-            _ => {}
-        }
-        match drt {
-            DrtKind::RgbLogSigmoid => parameters.set_linear_log_sigmoid_for_headroom(
-                self.rgb_log_sigmoid_parameters,
-                self.hdr_headroom,
-            ),
-            DrtKind::OklabLogSigmoid => parameters
-                .set_linear_log_sigmoid_for_headroom(self.oklab_log_sigmoid_parameters, 1.0),
-            _ => parameters.set_log_sigmoid_for_headroom(self.agx_s2o3_parameters, 1.0),
-        }
-        parameters.set_reinhard_for_drt(
-            drt,
-            self.oklab_reinhard_parameters,
-            self.rgb_reinhard_parameters,
-            self.hdr_headroom,
-        );
+        parameters.set_log_sigmoid_for_headroom(self.agx_s2o3_parameters, 1.0);
+        parameters.set_reinhard_for_drt(drt, self.rgb_reinhard_parameters, self.hdr_headroom);
         if drt == DrtKind::OklabAces {
             parameters.set_oklab_aces_for_headroom(self.oklab_aces_parameters, self.hdr_headroom);
-        }
-        if drt == DrtKind::OklabNeutral {
-            parameters
-                .set_oklab_neutral_for_headroom(self.oklab_neutral_parameters, self.hdr_headroom);
-        }
-        if drt == DrtKind::Aces20Curve {
-            parameters.set_oklab_aces_for_headroom(self.aces20_curve_parameters, self.hdr_headroom);
         }
         parameters
     }
 
     fn refresh_reference_data(&mut self) {
-        for kind in [
-            DrtKind::Aces20,
-            DrtKind::Aces20Curve,
-            DrtKind::FidelityFxLpm,
-        ] {
+        for kind in [DrtKind::Aces20, DrtKind::FidelityFxLpm] {
             let data = crate::reference::data(kind, self.hdr_headroom);
             let resources = &mut self.reference_resources[kind.index()];
             let bytes = bytemuck::cast_slice::<f32, u8>(&data);
@@ -1661,8 +1263,8 @@ mod reference_validation;
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_COMPRESSION_START, DEFAULT_GAMUT_COMPRESSION, DrtKind, LinearLogSigmoidParameters,
-        LogSigmoidParameters, Parameters, ReinhardParameters, curve_coefficient, curve_parameters,
+        DEFAULT_COMPRESSION_START, DEFAULT_GAMUT_COMPRESSION, DrtKind, LogSigmoidParameters,
+        OklabAcesParameters, Parameters, ReinhardParameters, curve_coefficient, curve_parameters,
         direct_output_headroom, extended_srgb_oetf,
     };
     use crate::tone_curve::SAMPLE_COUNT;
@@ -1726,111 +1328,6 @@ mod tests {
         assert!((parameters.log_sigmoid_inverse_dynamic_range - 1.0 / 16.5).abs() < 1.0e-7);
         assert!((parameters.log_sigmoid_toe_coefficient - 59.507_874).abs() < 1.0e-4);
         assert!((parameters.sigmoid_shoulder_coefficient - 69.862_79).abs() < 1.0e-3);
-        assert_eq!(parameters.rgb_log_sigmoid_hue_retention, 0.5);
-    }
-
-    #[test]
-    fn rgb_log_sigmoid_keeps_the_reference_curve_defaults_separate() {
-        let source = LinearLogSigmoidParameters::default().tone_scale();
-        let mut parameters = Parameters::new(1280, 720);
-        parameters.set_log_sigmoid(source);
-
-        assert!((source.output_pivot - 0.461_356_13).abs() < 1.0e-7);
-        assert!((source.pivot_slope - 2.460_636_6).abs() < 1.0e-6);
-        assert_eq!(source.shoulder_power, 5.2);
-        assert_eq!(source.gamut_compression, 0.04);
-        assert!((parameters.sigmoid_shoulder_coefficient - 2_568.749_8).abs() < 1.0e-2);
-        assert_eq!(parameters.log_sigmoid_maximum_log_coordinate, 1.0);
-        assert_eq!(parameters.log_sigmoid_output_peak, 1.0);
-        assert_ne!(source, LogSigmoidParameters::s2o3_reference());
-    }
-
-    #[test]
-    fn rgb_log_sigmoid_linear_segment_matches_the_shoulder_tangent() {
-        for linear_slope in [0.1, 0.25, 1.0, 4.0] {
-            for highlight_ev in [1.0, 6.5, 20.0] {
-                for shoulder_power in [1.0, 5.2, 8.0] {
-                    let mut source = LinearLogSigmoidParameters {
-                        linear_slope,
-                        highlight_ev,
-                        shoulder_power,
-                        ..LinearLogSigmoidParameters::default()
-                    };
-                    source.constrain();
-                    let tone = source.tone_scale();
-                    for headroom in [1.0, 4.0, 64.0] {
-                        let mut p = Parameters::new(1, 1);
-                        p.set_log_sigmoid_for_headroom(tone, headroom);
-                        // Reference constraints must not alter the derived value or tangent.
-                        assert_eq!(
-                            p.log_sigmoid_output_pivot,
-                            extended_srgb_oetf(0.18 * linear_slope)
-                        );
-                        assert_eq!(p.log_sigmoid_pivot_slope, tone.pivot_slope);
-                        assert!(
-                            p.sigmoid_shoulder_coefficient.is_finite()
-                                && p.sigmoid_shoulder_coefficient > 0.0
-                        );
-                        let step = 1.0e-4;
-                        let left = (extended_srgb_oetf(0.18 * linear_slope)
-                            - extended_srgb_oetf((0.18 - step) * linear_slope))
-                            / step;
-                        let distance =
-                            ((0.18 + step) / 0.18).log2() * p.log_sigmoid_inverse_dynamic_range;
-                        let right = p.log_sigmoid_pivot_slope
-                            * distance
-                            * (1.0
-                                + p.sigmoid_shoulder_coefficient * distance.powf(shoulder_power))
-                            .powf(-1.0 / shoulder_power)
-                            / step;
-                        assert!(
-                            (right / left - 1.0).abs() < 0.003,
-                            "{source:?}, headroom {headroom}: {left} vs {right}"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn rgb_log_sigmoid_extends_only_the_shoulder_for_hdr() {
-        let source = LinearLogSigmoidParameters::default().tone_scale();
-        let mut sdr = Parameters::new(1, 1);
-        sdr.set_log_sigmoid(source);
-        let mut hdr = Parameters::new(1, 1);
-        hdr.set_log_sigmoid_for_headroom(source, 4.0);
-
-        assert_eq!(hdr.log_sigmoid_minimum_log2, sdr.log_sigmoid_minimum_log2);
-        assert_eq!(
-            hdr.log_sigmoid_inverse_dynamic_range,
-            sdr.log_sigmoid_inverse_dynamic_range
-        );
-        assert_eq!(hdr.log_sigmoid_input_pivot, sdr.log_sigmoid_input_pivot);
-        assert_eq!(hdr.log_sigmoid_output_pivot, sdr.log_sigmoid_output_pivot);
-        assert_eq!(hdr.log_sigmoid_pivot_slope, sdr.log_sigmoid_pivot_slope);
-        assert_eq!(
-            hdr.log_sigmoid_toe_coefficient,
-            sdr.log_sigmoid_toe_coefficient
-        );
-        assert!(hdr.log_sigmoid_output_peak > 1.0);
-        assert!(hdr.log_sigmoid_maximum_log_coordinate > 1.0);
-
-        let distance = hdr.log_sigmoid_maximum_log_coordinate - hdr.log_sigmoid_input_pivot;
-        let mapped_peak = hdr.log_sigmoid_output_pivot
-            + hdr.log_sigmoid_pivot_slope
-                * distance
-                * (1.0
-                    + hdr.sigmoid_shoulder_coefficient * distance.powf(hdr.sigmoid_shoulder_power))
-                .powf(-1.0 / hdr.sigmoid_shoulder_power);
-        assert!((mapped_peak - hdr.log_sigmoid_output_peak).abs() < 2.0e-5);
-        assert!(
-            (source.output_highlight_ev(hdr.log_sigmoid_output_peak)
-                - (hdr.log_sigmoid_maximum_log_coordinate - hdr.log_sigmoid_input_pivot)
-                    / hdr.log_sigmoid_inverse_dynamic_range)
-                .abs()
-                < 2.0e-5
-        );
     }
 
     #[test]
@@ -1838,8 +1335,7 @@ mod tests {
         let mut image_parameters = Parameters::new(3840, 2160);
         image_parameters.exposure_multiplier = 32.0;
         image_parameters.show_anomalies = 1;
-        image_parameters
-            .set_log_sigmoid_for_headroom(LogSigmoidParameters::original_rgb_reference(), 4.0);
+        image_parameters.set_log_sigmoid_for_headroom(LogSigmoidParameters::s2o3_reference(), 4.0);
         image_parameters.set_reinhard_for_headroom(
             ReinhardParameters {
                 linear_slope: 1.25,
@@ -1904,59 +1400,66 @@ mod tests {
         assert_eq!(parameters.rgb_hue_retention, 0.5);
         assert_eq!(parameters.linear_curve_peak, curve.curve_peak);
         assert!(curve.curve_peak > 1.0 && curve.curve_peak < 1.01);
-        assert_eq!(std::mem::size_of::<Parameters>(), 132);
+        assert_eq!(std::mem::size_of::<Parameters>(), 120);
+        assert_eq!(
+            std::mem::offset_of!(Parameters, oklab_aces_linear_slope),
+            108
+        );
+        assert_eq!(
+            std::mem::offset_of!(Parameters, oklab_aces_compression_start),
+            112
+        );
+        assert_eq!(
+            std::mem::offset_of!(Parameters, oklab_aces_shoulder_power),
+            116
+        );
     }
 
     #[test]
-    fn oklab_and_rgb_reinhard_keep_independent_curves_across_drt_and_hdr_changes() {
-        let mut oklab = ReinhardParameters::oklab_default();
-        let mut reinhard = ReinhardParameters::default();
-        assert_eq!(
-            oklab.curve_for_headroom(1.0).compression_start,
-            DEFAULT_COMPRESSION_START
-        );
-        assert_eq!(oklab.linear_slope, reinhard.linear_slope);
-        assert_eq!(oklab.highlight_reach_ev, 6.5);
-        assert_eq!(reinhard.highlight_reach_ev, 10.0);
-        let original_oklab = oklab.curve_for_headroom(1.0);
-        assert!(original_oklab.curve_peak > 1.04 && original_oklab.curve_peak < 1.05);
-
-        let mut parameters = Parameters::new(1, 1);
-        for drt in [
-            DrtKind::OklabReinhard,
-            DrtKind::RgbReinhard,
-            DrtKind::OklabReinhard,
-        ] {
-            parameters.set_reinhard_for_drt(drt, oklab, reinhard, 4.0);
-            let (source, headroom) = if drt == DrtKind::OklabReinhard {
-                (oklab, 1.0)
-            } else {
-                (reinhard, 4.0)
-            };
-            let expected = source.curve_for_headroom(headroom);
-            assert_eq!(
-                parameters.linear_compression_start,
-                expected.compression_start
-            );
-            assert_eq!(parameters.linear_slope, expected.linear_slope);
-            assert_eq!(parameters.linear_curve_peak, expected.curve_peak);
-            assert_eq!(parameters.linear_output_peak, headroom);
-
-            // Edits to the other DRT must leave the active curve intact.
-            if drt == DrtKind::OklabReinhard {
-                reinhard.linear_slope = 2.0;
-                reinhard.highlight_reach_ev = 8.0;
-            } else {
-                oklab.linear_slope = 1.5;
-                oklab.highlight_reach_ev = 7.5;
+    fn retained_baselines_keep_independent_curves_across_drt_and_hdr_changes() {
+        let aces = OklabAcesParameters {
+            linear_slope: 1.25,
+            compression_start: 0.3,
+            ..OklabAcesParameters::default()
+        };
+        let reinhard = ReinhardParameters {
+            linear_slope: 0.75,
+            compression_start: 0.1,
+            highlight_reach_ev: 8.0,
+            ..ReinhardParameters::default()
+        };
+        for headroom in [1.0, 4.0, 64.0] {
+            let mut parameters = Parameters::new(1, 1);
+            parameters.set_oklab_aces_for_headroom(aces, headroom);
+            let expected_aces = aces.curve_for_headroom(headroom);
+            for drt in [
+                DrtKind::RgbReinhard,
+                DrtKind::OklabAces,
+                DrtKind::RgbReinhard,
+            ] {
+                parameters.set_reinhard_for_drt(drt, reinhard, headroom);
+                assert_eq!(
+                    parameters.oklab_aces_linear_slope,
+                    expected_aces.linear_slope
+                );
+                assert_eq!(
+                    parameters.oklab_aces_compression_start,
+                    expected_aces.compression_start
+                );
+                assert_eq!(
+                    parameters.oklab_aces_shoulder_power,
+                    expected_aces.shoulder_power
+                );
+                let expected_rgb = reinhard.curve_for_headroom(headroom);
+                assert_eq!(parameters.linear_slope, expected_rgb.linear_slope);
+                assert_eq!(parameters.linear_curve_peak, expected_rgb.curve_peak);
+                if drt == DrtKind::OklabAces {
+                    parameters.set_oklab_aces_for_headroom(aces, headroom);
+                    assert_eq!(parameters.linear_slope, expected_rgb.linear_slope);
+                    assert_eq!(parameters.linear_curve_peak, expected_rgb.curve_peak);
+                }
+                assert_eq!(parameters.linear_output_peak, headroom);
             }
-            parameters.set_reinhard_for_drt(drt, oklab, reinhard, 4.0);
-            assert_eq!(
-                parameters.linear_compression_start,
-                expected.compression_start
-            );
-            assert_eq!(parameters.linear_slope, expected.linear_slope);
-            assert_eq!(parameters.linear_curve_peak, expected.curve_peak);
         }
     }
 
@@ -1964,9 +1467,8 @@ mod tests {
     fn none_uses_the_requested_hdr_headroom_without_tone_mapping() {
         assert_eq!(direct_output_headroom(DrtKind::None, 4.0), 4.0);
         assert_eq!(direct_output_headroom(DrtKind::RgbReinhard, 4.0), 4.0);
-        assert_eq!(direct_output_headroom(DrtKind::OklabReinhard, 4.0), 1.0);
+        assert_eq!(direct_output_headroom(DrtKind::OklabAces, 4.0), 4.0);
         assert_eq!(direct_output_headroom(DrtKind::AgxS2O3, 4.0), 1.0);
-        assert_eq!(direct_output_headroom(DrtKind::RgbLogSigmoid, 4.0), 1.0);
         for kind in DrtKind::REFERENCES {
             assert_eq!(
                 direct_output_headroom(kind, 4.0),
@@ -2066,88 +1568,27 @@ mod tests {
     }
 
     #[test]
-    fn movable_joins_keep_linear_shadows_tangents_and_peak() {
+    fn movable_reinhard_joins_keep_linear_shadows_and_peak() {
         for gain in [0.1, 1.0, 4.0] {
             for start in [0.0, 0.001, 0.02, 0.18, 0.5, 100.0] {
                 for reach in [1.0, 6.5, 20.0] {
-                    let mut reinhard = ReinhardParameters {
+                    let mut source = ReinhardParameters {
                         linear_slope: gain,
                         compression_start: start,
                         highlight_reach_ev: reach,
                         ..ReinhardParameters::default()
                     };
-                    reinhard.constrain();
-                    for power in [1.0, 5.2, 8.0] {
-                        let mut log = LinearLogSigmoidParameters {
-                            linear_slope: gain,
-                            compression_start: start,
-                            highlight_ev: reach,
-                            shoulder_power: power,
-                            ..LinearLogSigmoidParameters::default()
-                        };
-                        log.constrain();
-                        assert!(log.compression_start > 0.0 && gain * log.compression_start < 1.0);
-                        for headroom in [1.0, 4.0, 64.0] {
-                            let curve = reinhard.curve_for_headroom(headroom);
-                            assert_eq!(curve.compression_start, reinhard.compression_start);
-                            assert_eq!(
-                                curve.map_linear(curve.compression_start * 0.5),
-                                gain * curve.compression_start * 0.5
-                            );
-                            let r = 0.18 * 2.0_f32.powf(curve.highlight_reach_ev);
-                            assert!((curve.map_linear(r) / headroom - 1.0).abs() < 2.0e-5);
-                            let mut p = Parameters::new(1, 1);
-                            p.set_linear_log_sigmoid_for_headroom(log, headroom);
-                            assert_eq!(
-                                p.log_sigmoid_output_pivot,
-                                extended_srgb_oetf(gain * log.compression_start)
-                            );
-                            let encoded_join = (log.compression_start.log2()
-                                - p.log_sigmoid_minimum_log2)
-                                * p.log_sigmoid_inverse_dynamic_range;
-                            assert!((encoded_join - p.log_sigmoid_input_pivot).abs() < 1.0e-6);
-                            assert!(
-                                p.sigmoid_shoulder_coefficient.is_finite()
-                                    && p.sigmoid_shoulder_coefficient > 0.0
-                            );
-                            let extent = f64::from(
-                                p.log_sigmoid_maximum_log_coordinate - p.log_sigmoid_input_pivot,
-                            );
-                            let peak = f64::from(p.log_sigmoid_output_pivot)
-                                + f64::from(p.log_sigmoid_pivot_slope)
-                                    * extent
-                                    * (1.0
-                                        + f64::from(p.sigmoid_shoulder_coefficient)
-                                            * extent.powf(f64::from(power)))
-                                    .powf(-1.0 / f64::from(power));
-                            assert!((peak - f64::from(p.log_sigmoid_output_peak)).abs() < 1.0e-5);
-                            let recovered_reach = (log.compression_start / 0.18).log2()
-                                + (p.log_sigmoid_maximum_log_coordinate
-                                    - p.log_sigmoid_input_pivot)
-                                    / p.log_sigmoid_inverse_dynamic_range;
-                            assert!(
-                                (recovered_reach
-                                    - log.output_highlight_ev(p.log_sigmoid_output_peak))
-                                .abs()
-                                    < 0.002
-                            );
-                            // Analytic derivative in stops, independent of normalized allocation.
-                            let delta = 1.0e-4_f64;
-                            let at_join = f64::from(log.compression_start * gain);
-                            let oetf = |x: f64| {
-                                if x <= 0.0031308 {
-                                    12.92 * x
-                                } else {
-                                    1.055 * x.powf(1.0 / 2.4) - 0.055
-                                }
-                            };
-                            let left =
-                                (oetf(at_join) - oetf(at_join * 2.0_f64.powf(-delta))) / delta;
-                            let right = f64::from(
-                                p.log_sigmoid_pivot_slope * p.log_sigmoid_inverse_dynamic_range,
-                            );
-                            assert!((right / left - 1.0).abs() < 0.001);
-                        }
+                    source.constrain();
+                    for headroom in [1.0, 4.0, 64.0] {
+                        let curve = source.curve_for_headroom(headroom);
+                        assert_eq!(curve.compression_start, source.compression_start);
+                        assert_eq!(
+                            curve.map_linear(curve.compression_start * 0.5),
+                            gain * curve.compression_start * 0.5
+                        );
+                        let reach_input = 0.18 * 2.0_f32.powf(curve.highlight_reach_ev);
+                        assert!((curve.map_linear(reach_input) / headroom - 1.0).abs() < 2.0e-5);
+                        assert!(curve.shoulder_scale.is_finite() && curve.shoulder_scale > 0.0);
                     }
                 }
             }

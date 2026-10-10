@@ -1,4 +1,4 @@
-// Display reference with no tone mapping.
+// Display conversion baseline with no tone mapping.
 // Input: scene-linear ACES2065-1 (AP0).
 // Output: display-encoded extended sRGB (1.0 is SDR reference white).
 

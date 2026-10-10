@@ -9,7 +9,6 @@ mod gpu;
 mod image_io;
 mod lpm_data;
 mod oklab_aces;
-mod oklab_neutral;
 mod presenter;
 mod reference;
 mod tone_curve;
@@ -24,10 +23,7 @@ use eframe::egui::{self, Color32, RichText, Vec2};
 use crate::comparison::ComparisonView;
 use crate::distribution::{ColorSpace, DEFAULT_PITCH, DEFAULT_YAW, DistributionRenderer};
 use crate::file_browser::{FolderBrowser, Thumbnail, ThumbnailLoader};
-use crate::gpu::{
-    DrtGpu, DrtKind, LinearLogSigmoidParameters, LogSigmoidParameters, OklabAcesParameters,
-    OklabChromaParameters, OklabNeutralParameters, ReinhardParameters,
-};
+use crate::gpu::{DrtGpu, DrtKind, LogSigmoidParameters, OklabAcesParameters, ReinhardParameters};
 use crate::presenter::{DisplayOutput, StartupOptions};
 use crate::tone_curve::ToneCurveRenderer;
 
@@ -61,7 +57,11 @@ fn main() -> anyhow::Result<()> {
                     .into_iter()
                     .find(|kind| {
                         kind.label().eq_ignore_ascii_case(&name)
-                            || kind.shader_file().ends_with(&format!("/{name}.wgsl"))
+                            || Path::new(kind.shader_file())
+                                .file_stem()
+                                .is_some_and(|stem| {
+                                    stem.to_string_lossy().eq_ignore_ascii_case(&name)
+                                })
                     })
                     .ok_or_else(|| anyhow::anyhow!("Unknown DRT: {name}"))?,
             );
@@ -82,15 +82,7 @@ struct DrtApp {
     gpu: DrtGpu,
     exposure_ev: f32,
     agx_s2o3_parameters: LogSigmoidParameters,
-    rgb_log_sigmoid_parameters: LinearLogSigmoidParameters,
-    oklab_log_sigmoid_parameters: LinearLogSigmoidParameters,
     oklab_aces_parameters: OklabAcesParameters,
-    aces20_curve_parameters: OklabAcesParameters,
-    oklab_neutral_parameters: OklabNeutralParameters,
-    rgb_log_sigmoid_hue_retention: f32,
-    oklab_reinhard_parameters: ReinhardParameters,
-    oklab_reinhard_chroma: OklabChromaParameters,
-    oklab_log_sigmoid_chroma: OklabChromaParameters,
     rgb_reinhard_parameters: ReinhardParameters,
     show_anomalies: bool,
     image_name: String,
@@ -160,15 +152,7 @@ impl DrtApp {
             gpu,
             exposure_ev: 0.0,
             agx_s2o3_parameters: LogSigmoidParameters::s2o3_reference(),
-            rgb_log_sigmoid_parameters: LinearLogSigmoidParameters::default(),
-            oklab_log_sigmoid_parameters: LinearLogSigmoidParameters::default(),
             oklab_aces_parameters: OklabAcesParameters::default(),
-            aces20_curve_parameters: OklabAcesParameters::default(),
-            oklab_neutral_parameters: OklabNeutralParameters::default(),
-            rgb_log_sigmoid_hue_retention: 0.5,
-            oklab_reinhard_parameters: ReinhardParameters::oklab_default(),
-            oklab_reinhard_chroma: OklabChromaParameters::default(),
-            oklab_log_sigmoid_chroma: OklabChromaParameters::default(),
             rgb_reinhard_parameters: ReinhardParameters::default(),
             show_anomalies: initial_show_anomalies,
             image_name,
@@ -471,20 +455,8 @@ impl DrtApp {
                         DrtKind::AgxS2O3 => {
                             self.gpu.set_agx_s2o3_parameters(self.agx_s2o3_parameters)
                         }
-                        DrtKind::OklabLogSigmoid => {
-                            self.gpu.set_oklab_log_sigmoid_parameters(self.oklab_log_sigmoid_parameters)
-                        }
                         DrtKind::OklabAces => {
                             self.gpu.set_oklab_aces_parameters(self.oklab_aces_parameters)
-                        }
-                        DrtKind::Aces20Curve => {
-                            self.gpu.set_aces20_curve_parameters(self.aces20_curve_parameters)
-                        }
-                        DrtKind::OklabNeutral => {
-                            self.gpu.set_oklab_neutral_parameters(self.oklab_neutral_parameters)
-                        }
-                        DrtKind::RgbLogSigmoid => {
-                            self.gpu.set_rgb_log_sigmoid_parameters(self.rgb_log_sigmoid_parameters)
                         }
                         DrtKind::RgbReinhard => self
                             .gpu
@@ -575,7 +547,6 @@ impl DrtApp {
                     }
                     let peak_label = match self.gpu.active_drt() {
                         DrtKind::None => "None",
-                        DrtKind::RgbLogSigmoid => "RGB Log Sigmoid",
                         DrtKind::RgbReinhard => "RGB Reinhard",
                         _ => "HDR target",
                     };
@@ -622,19 +593,10 @@ impl DrtApp {
                 if exposure_changed {
                     self.gpu.set_exposure(self.exposure_ev);
                 }
-                if matches!(active_drt, DrtKind::OklabAces | DrtKind::Aces20Curve) {
-                    let using_aces_curve = active_drt == DrtKind::Aces20Curve;
-                    let mut source = if using_aces_curve {
-                        self.aces20_curve_parameters
-                    } else {
-                        self.oklab_aces_parameters
-                    };
+                if active_drt == DrtKind::OklabAces {
+                    let mut source = self.oklab_aces_parameters;
                     ui.separator();
-                    ui.label(RichText::new(if using_aces_curve {
-                        "ACES 2.0 curve experiment"
-                    } else {
-                        "ACES-inspired Oklab experiment"
-                    }).strong());
+                    ui.label(RichText::new("ACES-inspired Oklab experiment").strong());
                     ui.label(RichText::new("Linear shadows · extended highlights · SDR/HDR").small().weak());
                     let mut changed = ui
                         .add(
@@ -642,11 +604,7 @@ impl DrtApp {
                                 .step_by(0.025)
                                 .text("Linear slope"),
                         )
-                        .on_hover_text(if using_aces_curve {
-                            "Scene-luminance gain below the shoulder; default 1. ACES color processing is retained."
-                        } else {
-                            "Linear tone gain below the shoulder; default 1. Gamut-edge chroma is protected at all brightness levels."
-                        })
+                        .on_hover_text("Linear tone gain below the shoulder; default 1. Gamut-edge chroma is protected at all brightness levels.")
                         .changed();
                     source.constrain();
                     let maximum_start = source.maximum_compression_start();
@@ -655,11 +613,7 @@ impl DrtApp {
                             egui::Slider::new(&mut source.compression_start, 0.0..=maximum_start)
                                 .text("Compression start"),
                         )
-                        .on_hover_text(if using_aces_curve {
-                            "Linear/shoulder join in scene luminance Y; default 0.18"
-                        } else {
-                            "Linear/shoulder join in Oklab L^3; default 0.18"
-                        })
+                        .on_hover_text("Linear/shoulder join in Oklab L^3; default 0.18")
                         .changed();
                     source.constrain();
                     let headroom = self.gpu.output_headroom();
@@ -691,94 +645,17 @@ impl DrtApp {
                         curve.map_linear(0.18),
                         curve.output_peak,
                     )).small().weak());
-                    ui.label(RichText::new(if using_aces_curve {
-                        "ACES 2 color processing · adjusted luminance curve"
-                    } else {
-                        "Fixed Oklab hue · continuous chroma mapping · extended highlights"
-                    }).small().weak());
-                    if using_aces_curve {
-                        self.aces20_curve_parameters = source;
-                        if changed {
-                            self.gpu.set_aces20_curve_parameters(source);
-                        }
-                    } else {
-                        self.oklab_aces_parameters = source;
-                        if changed {
-                            self.gpu.set_oklab_aces_parameters(source);
-                        }
-                    }
-                }
-                if active_drt == DrtKind::OklabNeutral {
-                    let mut source = self.oklab_neutral_parameters;
-                    ui.separator();
-                    ui.label(RichText::new("Max-RGB Oklab neutral experiment").strong());
-                    ui.label(RichText::new("BT.709 max RGB · root-LMS white path · SDR/HDR").small().weak());
-                    let mut changed = ui
-                        .add(
-                            egui::Slider::new(&mut source.linear_slope, 0.1..=4.0)
-                                .step_by(0.025)
-                                .text("Linear slope"),
-                        )
-                        .on_hover_text("Scene-linear RGB gain below the max-channel shoulder; default 1")
-                        .changed();
-                    source.constrain();
-                    let maximum_start = source.maximum_compression_start();
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut source.compression_start, 0.0..=maximum_start)
-                                .text("Compression start"),
-                        )
-                        .on_hover_text("Maximum linear BT.709 RGB channel at the linear/shoulder join; default 0.6")
-                        .changed();
-                    source.constrain();
-                    let headroom = self.gpu.output_headroom();
-                    let [minimum_reach, maximum_reach] = source.highlight_reach_range(headroom);
-                    let reach_adjustable = maximum_reach - minimum_reach > 0.0001;
-                    let mut highlight_reach = source.curve_for_headroom(headroom).highlight_reach_ev();
-                    if ui
-                        .add_enabled(
-                            reach_adjustable,
-                            egui::Slider::new(&mut highlight_reach, minimum_reach..=maximum_reach)
-                                .step_by(0.25)
-                                .suffix(" EV")
-                                .text("Highlight reach"),
-                        )
-                        .on_hover_text("Scene stops above 18% gray whose maximum channel reaches 98% of the current display peak. Smaller values reach white sooner; larger values extend the highlights. SDR default 10 EV. The linear shadows stay unchanged.")
-                        .changed()
-                    {
-                        source.set_highlight_reach_ev(highlight_reach, headroom);
-                        changed = true;
-                    }
-                    if !reach_adjustable {
-                        ui.label(RichText::new("Lower Compression start to adjust highlight reach.").small().weak());
-                    }
-                    source.constrain();
-                    let curve = source.curve_for_headroom(headroom);
-                    ui.label(RichText::new(format!(
-                        "98% peak at +{:.2} EV · gray {:.3} · peak {:.2}",
-                        curve.highlight_reach_ev(),
-                        curve.map_linear(0.18),
-                        curve.output_peak,
-                    )).small().weak());
-                    ui.label(RichText::new("Root-LMS white path · max-RGB shoulder").small().weak());
-                    self.oklab_neutral_parameters = source;
+                    ui.label(RichText::new("Fixed Oklab hue · continuous chroma mapping · extended highlights").small().weak());
+                    self.oklab_aces_parameters = source;
                     if changed {
-                        self.gpu.set_oklab_neutral_parameters(source);
+                        self.gpu.set_oklab_aces_parameters(source);
                     }
                 }
-                if matches!(active_drt, DrtKind::RgbReinhard | DrtKind::OklabReinhard) {
-                    let using_oklab = active_drt.is_oklab();
-                    let mut linear_parameters = if using_oklab {
-                        self.oklab_reinhard_parameters
-                    } else {
-                        self.rgb_reinhard_parameters
-                    };
+                if active_drt == DrtKind::RgbReinhard {
+                    let mut linear_parameters = self.rgb_reinhard_parameters;
                     ui.separator();
                     let mut linear_changed = false;
                     ui.label(RichText::new(format!("{} tone scale", active_drt.label())).strong());
-                    if using_oklab {
-                        ui.label(RichText::new("Independent curve in Oklab L^3 · SDR output").small().weak());
-                    }
                     linear_changed |= ui
                         .add(
                             egui::Slider::new(
@@ -797,7 +674,7 @@ impl DrtApp {
                     linear_changed |= ui.add(
                         egui::Slider::new(&mut linear_parameters.compression_start, 0.0..=maximum_start)
                             .step_by(0.001).max_decimals(3).text("Compression start")
-                    ).on_hover_text("Scene-linear RGB or Oklab L^3 at the linear/shoulder join; default 0.18").changed();
+                    ).on_hover_text("Scene-linear RGB at the linear/shoulder join; default 0.18").changed();
                     linear_parameters.constrain();
                     let minimum_reach = linear_parameters.minimum_highlight_reach_ev();
                     linear_changed |= ui
@@ -814,34 +691,26 @@ impl DrtApp {
                             "Scene stops above 18% gray that first reach the display peak; shorter reach permits more curve overexposure and preserves stronger mid-highlight color",
                         )
                         .changed();
-                    if !using_oklab {
-                        linear_changed |= ui.add(
-                            egui::Slider::new(&mut linear_parameters.gamut_compression, 0.0..=0.8)
-                                .step_by(0.01).text("Gamut compression")
-                        ).on_hover_text("Virtual RGB inset toward the neutral axis; default 0.04").changed();
-                    }
-                    if !using_oklab {
-                        linear_changed |= ui
-                            .add(
-                                egui::Slider::new(
-                                    &mut linear_parameters.hue_retention,
-                                    0.0..=1.0,
-                                )
-                                .step_by(0.01)
-                                .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
-                                .text("Hue retention"),
+                    linear_changed |= ui.add(
+                        egui::Slider::new(&mut linear_parameters.gamut_compression, 0.0..=0.8)
+                            .step_by(0.01).text("Gamut compression")
+                    ).on_hover_text("Virtual RGB inset toward the neutral axis; default 0.04").changed();
+                    linear_changed |= ui
+                        .add(
+                            egui::Slider::new(
+                                &mut linear_parameters.hue_retention,
+                                0.0..=1.0,
                             )
-                            .on_hover_text(
-                                "Moves the mapped hue toward the original sRGB hue along the shortest angular path; mapped saturation and value stay unchanged",
-                            )
-                            .changed();
-                    }
+                            .step_by(0.01)
+                            .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
+                            .text("Hue retention"),
+                        )
+                        .on_hover_text(
+                            "Moves the mapped hue toward the original sRGB hue along the shortest angular path; mapped saturation and value stay unchanged",
+                        )
+                        .changed();
                     linear_parameters.constrain();
-                    let curve_headroom = if !using_oklab {
-                        self.gpu.output_headroom()
-                    } else {
-                        1.0
-                    };
+                    let curve_headroom = self.gpu.output_headroom();
                     let curve = linear_parameters.curve_for_headroom(curve_headroom);
                     let mapped_gray = curve.map_linear(0.18);
                     let effective_reach = curve.highlight_reach_ev;
@@ -861,13 +730,8 @@ impl DrtApp {
                     );
                     ui.label(RichText::new(curve_details).small().weak());
                     if linear_changed {
-                        if using_oklab {
-                            self.oklab_reinhard_parameters = linear_parameters;
-                            self.gpu.set_oklab_reinhard_parameters(linear_parameters);
-                        } else {
-                            self.rgb_reinhard_parameters = linear_parameters;
-                            self.gpu.set_rgb_reinhard_parameters(linear_parameters);
-                        }
+                        self.rgb_reinhard_parameters = linear_parameters;
+                        self.gpu.set_rgb_reinhard_parameters(linear_parameters);
                     }
                 }
                 if active_drt == DrtKind::AgxS2O3 {
@@ -969,148 +833,6 @@ impl DrtApp {
                         self.gpu.set_agx_s2o3_parameters(log_sigmoid_parameters);
                     }
                 }
-                if active_drt.uses_linear_log_sigmoid() {
-                    let using_oklab = active_drt == DrtKind::OklabLogSigmoid;
-                    let mut source = if using_oklab {
-                        self.oklab_log_sigmoid_parameters
-                    } else {
-                        self.rgb_log_sigmoid_parameters
-                    };
-                    ui.separator();
-                    ui.label(RichText::new(format!("{} tone scale", active_drt.label())).strong());
-                    if using_oklab {
-                        ui.label(RichText::new("Independent curve in Oklab L^3 · SDR output").small().weak());
-                    }
-                    let mut changed = ui
-                        .add(
-                            egui::Slider::new(&mut source.linear_slope, 0.1..=4.0)
-                                .step_by(0.01)
-                                .text("Linear slope"),
-                        )
-                        .on_hover_text("Display-linear gain below Compression start; default 1")
-                        .changed();
-                    source.constrain();
-                    let minimum_start = source.minimum_compression_start();
-                    let maximum_start = source.maximum_compression_start();
-                    changed |= ui.add(
-                        egui::Slider::new(&mut source.compression_start, minimum_start..=maximum_start)
-                            .step_by(0.001).max_decimals(3).text("Compression start")
-                    ).on_hover_text("Linear/sigmoid join in scene-linear RGB or Oklab L^3; range preserves a tangent-matched shoulder within the 20 EV reach limit").changed();
-                    source.constrain();
-                    let minimum_reach = source.minimum_highlight_ev();
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut source.highlight_ev, minimum_reach..=20.0)
-                                .step_by(0.25)
-                                .suffix(" EV")
-                                .text("Highlight reach"),
-                        )
-                        .on_hover_text(if using_oklab {
-                            "Stops in L^3 above 18% gray mapped to SDR white"
-                        } else {
-                            "Scene stops above 18% gray mapped to SDR white; HDR extends the shoulder automatically"
-                        })
-                        .changed();
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut source.shoulder_power, 1.0..=8.0)
-                                .step_by(0.05)
-                                .text("Shoulder power"),
-                        )
-                        .on_hover_text("Higher values delay highlight compression and approach white more sharply")
-                        .changed();
-                    if !using_oklab {
-                        changed |= ui.add(
-                            egui::Slider::new(&mut source.gamut_compression, 0.0..=0.8)
-                                .step_by(0.01).text("Gamut compression")
-                        ).on_hover_text("Virtual RGB inset toward the neutral axis; default 0.04").changed();
-                    }
-                    source.constrain();
-                    let curve = source.tone_scale();
-                    ui.label(RichText::new(format!(
-                        "Linear through {:.3} · join output {:.3}", source.compression_start, curve.output_pivot
-                    )).small().weak());
-                    if !using_oklab && self.gpu.output_peak() > 1.0 {
-                        ui.label(RichText::new(format!(
-                            "HDR highlight reach {:+.2} EV", source.output_highlight_ev(self.gpu.output_peak())
-                        )).small().weak());
-                    }
-                    if using_oklab {
-                        self.oklab_log_sigmoid_parameters = source;
-                        if changed {
-                            self.gpu.set_oklab_log_sigmoid_parameters(source);
-                        }
-                        ui.label(RichText::new("Fixed Oklab hue with soft chroma compression.").small().weak());
-                    } else {
-                        self.rgb_log_sigmoid_parameters = source;
-                        if changed {
-                            self.gpu.set_rgb_log_sigmoid_parameters(source);
-                        }
-                        ui.label(RichText::new("Neutral shadows stay linear; color processing can change colored shadows.").small().weak());
-                    }
-                }
-                if active_drt == DrtKind::RgbLogSigmoid {
-                    ui.separator();
-                    ui.label(RichText::new("HSV hue repair").strong());
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut self.rgb_log_sigmoid_hue_retention, 0.0..=1.0)
-                                .step_by(0.01)
-                                .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
-                                .text("Hue retention"),
-                        )
-                        .on_hover_text("Uniform original-hue retention across all brightness levels; saturation and value stay unchanged")
-                        .changed()
-                    {
-                        self.gpu.set_rgb_log_sigmoid_hue_retention(self.rgb_log_sigmoid_hue_retention);
-                    }
-                }
-                if matches!(active_drt, DrtKind::OklabReinhard | DrtKind::OklabLogSigmoid) {
-                    let mut source = if active_drt == DrtKind::OklabReinhard {
-                        self.oklab_reinhard_chroma
-                    } else {
-                        self.oklab_log_sigmoid_chroma
-                    };
-                    ui.separator();
-                    ui.label(RichText::new("Oklab chroma").strong());
-                    let mut changed = ui
-                        .add(
-                            egui::Slider::new(&mut source.highlight_chroma_power, 1.0..=32.0)
-                                .step_by(0.25).text("Highlight chroma power"),
-                        )
-                        .on_hover_text("Higher powers keep chroma longer before fading to white; default 12")
-                        .changed();
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut source.gamut_rounding_power, 1.0..=8.0)
-                                .step_by(0.1).text("Gamut rounding power"),
-                        )
-                        .on_hover_text("Higher powers round the cusp less and retain more chroma near the gamut boundary; default 4")
-                        .changed();
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut source.endpoint_compression_power, 1.0..=64.0)
-                                .step_by(0.5).text("Endpoint chroma power"),
-                        )
-                        .on_hover_text("Chroma compression power near black and white; higher retains more chroma, default 32")
-                        .changed();
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut source.midtone_compression_power, 1.0..=64.0)
-                                .step_by(0.5).text("Midtone chroma power"),
-                        )
-                        .on_hover_text("Chroma compression power at Oklab L=0.5, blended smoothly toward the endpoint power; default 16")
-                        .changed();
-                    source.constrain();
-                    if active_drt == DrtKind::OklabReinhard {
-                        self.oklab_reinhard_chroma = source;
-                    } else {
-                        self.oklab_log_sigmoid_chroma = source;
-                    }
-                    if changed {
-                        self.gpu.set_oklab_chroma_parameters(active_drt, source);
-                    }
-                }
                 if ui
                     .checkbox(&mut self.show_anomalies, "Show anomalies")
                     .on_hover_text(
@@ -1139,31 +861,12 @@ impl DrtApp {
                 if ui.button("Reset parameters").clicked() {
                     self.exposure_ev = 0.0;
                     self.agx_s2o3_parameters = LogSigmoidParameters::s2o3_reference();
-                    self.rgb_log_sigmoid_parameters = LinearLogSigmoidParameters::default();
-                    self.oklab_log_sigmoid_parameters = LinearLogSigmoidParameters::default();
                     self.oklab_aces_parameters = OklabAcesParameters::default();
-                    self.aces20_curve_parameters = OklabAcesParameters::default();
-                    self.oklab_neutral_parameters = OklabNeutralParameters::default();
-                    self.rgb_log_sigmoid_hue_retention = 0.5;
-                    self.oklab_reinhard_parameters = ReinhardParameters::oklab_default();
-                    self.oklab_reinhard_chroma = OklabChromaParameters::default();
-                    self.oklab_log_sigmoid_chroma = OklabChromaParameters::default();
-                    self.gpu.set_oklab_chroma_parameters(DrtKind::OklabReinhard, self.oklab_reinhard_chroma);
-                    self.gpu.set_oklab_chroma_parameters(DrtKind::OklabLogSigmoid, self.oklab_log_sigmoid_chroma);
                     self.rgb_reinhard_parameters = ReinhardParameters::default();
                     self.show_anomalies = false;
                     self.gpu.set_exposure(self.exposure_ev);
                     self.gpu.set_agx_s2o3_parameters(self.agx_s2o3_parameters);
-                    self.gpu.set_rgb_log_sigmoid_parameters(self.rgb_log_sigmoid_parameters);
-                    self.gpu.set_oklab_log_sigmoid_parameters(self.oklab_log_sigmoid_parameters);
                     self.gpu.set_oklab_aces_parameters(self.oklab_aces_parameters);
-                    self.gpu.set_aces20_curve_parameters(self.aces20_curve_parameters);
-                    self.gpu.set_oklab_neutral_parameters(self.oklab_neutral_parameters);
-                    self.gpu.set_rgb_log_sigmoid_hue_retention(
-                        self.rgb_log_sigmoid_hue_retention,
-                    );
-                    self.gpu
-                        .set_oklab_reinhard_parameters(self.oklab_reinhard_parameters);
                     self.gpu
                         .set_rgb_reinhard_parameters(self.rgb_reinhard_parameters);
                     self.gpu.set_show_anomalies(false);

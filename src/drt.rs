@@ -13,12 +13,7 @@ pub enum DrtKind {
     OpenDrt,
     Uchimura,
     AcesFitted,
-    Aces20Curve,
-    OklabLogSigmoid,
-    OklabReinhard,
     OklabAces,
-    OklabNeutral,
-    RgbLogSigmoid,
     RgbReinhard,
 }
 
@@ -37,16 +32,8 @@ impl DrtKind {
         Self::Uchimura,
         Self::AcesFitted,
     ];
-    pub const RESEARCH: [Self; 7] = [
-        Self::Aces20Curve,
-        Self::OklabLogSigmoid,
-        Self::OklabReinhard,
-        Self::OklabAces,
-        Self::OklabNeutral,
-        Self::RgbLogSigmoid,
-        Self::RgbReinhard,
-    ];
-    pub const ALL: [Self; 20] = [
+    pub const RESEARCH: [Self; 2] = [Self::OklabAces, Self::RgbReinhard];
+    pub const ALL: [Self; 15] = [
         Self::None,
         Self::AgxS2O3,
         Self::Aces13,
@@ -60,12 +47,7 @@ impl DrtKind {
         Self::OpenDrt,
         Self::Uchimura,
         Self::AcesFitted,
-        Self::Aces20Curve,
-        Self::OklabLogSigmoid,
-        Self::OklabReinhard,
         Self::OklabAces,
-        Self::OklabNeutral,
-        Self::RgbLogSigmoid,
         Self::RgbReinhard,
     ];
 
@@ -75,7 +57,6 @@ impl DrtKind {
             Self::AgxS2O3 => "AgX-S2O3",
             Self::Aces13 => "ACES 1.3 RRT + ODT",
             Self::Aces20 => "ACES 2.0",
-            Self::Aces20Curve => "ACES 2.0 Curve",
             Self::BlenderAgx => "Blender AgX",
             Self::Filmic => "Filmic Base Contrast",
             Self::FidelityFxLpm => "AMD FidelityFX LPM",
@@ -85,11 +66,7 @@ impl DrtKind {
             Self::OpenDrt => "OpenDRT",
             Self::Uchimura => "Uchimura / GT",
             Self::AcesFitted => "ACES Filmic Fitted",
-            Self::OklabLogSigmoid => "Oklab Log Sigmoid",
-            Self::OklabReinhard => "Oklab Reinhard",
             Self::OklabAces => "Oklab ACES-inspired",
-            Self::OklabNeutral => "Oklab Neutral",
-            Self::RgbLogSigmoid => "RGB Log Sigmoid",
             Self::RgbReinhard => "RGB Reinhard",
         }
     }
@@ -103,9 +80,6 @@ impl DrtKind {
             }
             Self::Aces20 => {
                 "Academy ACES 2 JMh tonescale, chroma compression and gamut mapping; Rec.709 SDR/HDR"
-            }
-            Self::Aces20Curve => {
-                "Experimental ACES 2.0 with a linear-shadow shoulder; original JMh, chroma compression and gamut mapping"
             }
             Self::BlenderAgx => {
                 "Blender's official E-Gamut AgX base LUT with tetrahedral interpolation; SDR Rec.1886 reference"
@@ -134,20 +108,8 @@ impl DrtKind {
             Self::AcesFitted => {
                 "Krzysztof Narkowicz's five-coefficient ACES Filmic fit; SDR approximation"
             }
-            Self::OklabLogSigmoid => {
-                "Analytic linear shadows and log2 sigmoid shoulder in Oklab L^3 with chroma compression"
-            }
-            Self::OklabReinhard => {
-                "Linear segment and Reinhard shoulder in Oklab L^3 with chroma compression"
-            }
             Self::OklabAces => {
                 "Experimental ACES-inspired shoulder with fixed Oklab hue and continuous chroma mapping; linear tone shadows and SDR/HDR"
-            }
-            Self::OklabNeutral => {
-                "Experimental max-RGB shoulder and root-LMS white path; linear Rec.709 shadows and SDR/HDR"
-            }
-            Self::RgbLogSigmoid => {
-                "Research RGB log2 sigmoid with exact linear shadows and HSV hue repair"
             }
             Self::RgbReinhard => {
                 "Research RGB linear segment and Reinhard shoulder with HSV hue repair"
@@ -157,11 +119,10 @@ impl DrtKind {
 
     pub fn shader_file(self) -> &'static str {
         match self {
-            Self::None => "research/none_drt.wgsl",
+            Self::None => "none_drt.wgsl",
             Self::AgxS2O3 => "reference/agx_s2o3.wgsl",
             Self::Aces13 => "reference/aces_13.wgsl",
             Self::Aces20 => "reference/aces_20.wgsl",
-            Self::Aces20Curve => "research/aces_20_curve.wgsl",
             Self::BlenderAgx => "reference/blender_agx.wgsl",
             Self::Filmic => "reference/filmic.wgsl",
             Self::FidelityFxLpm => "reference/fidelityfx_lpm.wgsl",
@@ -171,11 +132,7 @@ impl DrtKind {
             Self::OpenDrt => "reference/opendrt.wgsl",
             Self::Uchimura => "reference/uchimura.wgsl",
             Self::AcesFitted => "reference/aces_fitted.wgsl",
-            Self::OklabLogSigmoid => "research/oklab_log_sigmoid.wgsl",
-            Self::OklabReinhard => "research/oklab_reinhard.wgsl",
             Self::OklabAces => "research/oklab_aces.wgsl",
-            Self::OklabNeutral => "research/oklab_neutral.wgsl",
-            Self::RgbLogSigmoid => "research/rgb_log_sigmoid.wgsl",
             Self::RgbReinhard => "research/rgb_reinhard.wgsl",
         }
     }
@@ -191,27 +148,15 @@ impl DrtKind {
         Self::REFERENCES.contains(&self)
     }
     pub fn uses_reference_wrapper(self) -> bool {
-        (self.is_reference() && self != Self::AgxS2O3) || self == Self::Aces20Curve
-    }
-    pub fn uses_linear_log_sigmoid(self) -> bool {
-        matches!(self, Self::RgbLogSigmoid | Self::OklabLogSigmoid)
-    }
-    pub fn is_oklab(self) -> bool {
-        matches!(
-            self,
-            Self::OklabReinhard | Self::OklabLogSigmoid | Self::OklabAces | Self::OklabNeutral
-        )
+        self.is_reference() && self != Self::AgxS2O3
     }
     pub fn supports_hdr(self) -> bool {
         matches!(
             self,
             Self::None
                 | Self::RgbReinhard
-                | Self::RgbLogSigmoid
                 | Self::OklabAces
-                | Self::OklabNeutral
                 | Self::Aces20
-                | Self::Aces20Curve
                 | Self::FidelityFxLpm
                 | Self::OpenDrt
                 | Self::Uchimura
@@ -226,7 +171,7 @@ impl DrtKind {
             Self::Aces13 => {
                 "https://github.com/aces-aswf/aces-core/tree/1256fee50ee35548c6eab8eca854ff3349008489"
             }
-            Self::Aces20 | Self::Aces20Curve => {
+            Self::Aces20 => {
                 "https://github.com/aces-aswf/aces-core/tree/069b0bc3e1f6c62820f19fdae2fecec3f4fc0f80"
             }
             Self::BlenderAgx => {

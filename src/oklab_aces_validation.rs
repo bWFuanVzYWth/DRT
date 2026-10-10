@@ -153,13 +153,6 @@ fn oklab_aces_highlights_keep_extended_detail_in_sdr_and_hdr() {
         "Oklab ACES-inspired extended highlights",
     )
     .unwrap();
-    let old = create_pipeline(
-        &gpu.device,
-        &gpu.layout,
-        BUILT_OKLAB_LOG_SIGMOID_SHADER,
-        "original Oklab highlight reference",
-    )
-    .unwrap();
     let evs = [6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 20.0];
     // The highest scene values exceed fp16's finite source range. Upload four
     // EV lower and apply exposure in f32 within the real GPU pipeline.
@@ -194,13 +187,7 @@ fn oklab_aces_highlights_keep_extended_detail_in_sdr_and_hdr() {
             assert!((pixel[1] - pixel[2]).abs() < 0.003);
         }
         if headroom == 1.0 {
-            parameters
-                .set_linear_log_sigmoid_for_headroom(LinearLogSigmoidParameters::default(), 1.0);
-            let old_output = gpu.render(&old, parameters, &input);
-            let old_ramp = old_output.as_chunks::<4>().0;
-            // The old finite input reach has already reached its display
-            // plateau while the experiment still distinguishes +14/+16/+20.
-            assert!((old_ramp[4][0] - old_ramp[5][0]).abs() <= 0.001);
+            // The tail still separates late highlights before fp16 white.
             assert!(ramp[5][0] - ramp[4][0] > 0.002);
         }
     }
@@ -396,17 +383,17 @@ fn oklab_aces_61_color_trajectories_preserve_final_display_hue() {
                 let old_pipeline = create_pipeline(
                     &gpu.device,
                     &gpu.layout,
-                    BUILT_OKLAB_REINHARD_SHADER,
-                    "trajectory report old Oklab",
+                    BUILT_RGB_REINHARD_SHADER,
+                    "trajectory report RGB Reinhard baseline",
                 )
                 .unwrap();
                 let mut old_parameters = Parameters::new(image.width, image.height);
-                old_parameters.set_reinhard_for_headroom(ReinhardParameters::oklab_default(), 1.0);
+                old_parameters.set_reinhard_for_headroom(ReinhardParameters::default(), 1.0);
                 let old_output = gpu.render(&old_pipeline, old_parameters, &image.rgba);
                 let document = serde_json::json!({
                     "width": image.width, "height": image.height, "headroom": headroom,
                     "input_space": "scene-linear AP0", "output_space": "extended sRGB",
-                    "inputs": image.rgba, "old_output": old_output, "new_output": output,
+                    "inputs": image.rgba, "rgb_reinhard_output": old_output, "oklab_aces_output": output,
                 });
                 let file =
                     std::fs::File::create(directory.join("oklab_aces_trajectory.json")).unwrap();
@@ -721,7 +708,10 @@ fn oklab_aces_same_h_highlights_use_one_soft_min_through_white() {
                     // the white endpoint; only assess measurable chroma.
                     if lab[1].hypot(lab[2]) / f64::from(headroom).cbrt() >= 0.01 {
                         let error = oklab_aces_validation_hue_error([1.0, hue[0], hue[1]], lab);
-                        assert!(error < 2.0, "display hue shifted {error} degrees: {context}");
+                        assert!(
+                            error < 2.0,
+                            "display hue shifted {error} degrees: {context}"
+                        );
                     }
                 }
             }

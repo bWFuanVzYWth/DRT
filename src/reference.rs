@@ -13,7 +13,6 @@ pub fn fragment(kind: DrtKind) -> &'static str {
     match kind {
         DrtKind::Aces13 => include_str!("../shaders/reference/aces_13.wgsl"),
         DrtKind::Aces20 => include_str!("../shaders/reference/aces_20.wgsl"),
-        DrtKind::Aces20Curve => include_str!("../shaders/research/aces_20_curve.wgsl"),
         DrtKind::BlenderAgx => include_str!("../shaders/reference/blender_agx.wgsl"),
         DrtKind::Filmic => include_str!("../shaders/reference/filmic.wgsl"),
         DrtKind::FidelityFxLpm => include_str!("../shaders/reference/fidelityfx_lpm.wgsl"),
@@ -38,7 +37,7 @@ fn floats(bytes: &[u8]) -> Vec<f32> {
 
 pub fn data(kind: DrtKind, headroom: f32) -> Vec<f32> {
     match kind {
-        DrtKind::Aces20 | DrtKind::Aces20Curve => crate::aces2_data::generate(headroom),
+        DrtKind::Aces20 => crate::aces2_data::generate(headroom),
         DrtKind::FidelityFxLpm => crate::lpm_data::generate(headroom),
         DrtKind::BlenderAgx => floats(include_bytes!(
             "../shaders/reference/assets/blender_agx.bin"
