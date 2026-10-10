@@ -722,6 +722,128 @@ fn oklab_aces_same_h_highlights_use_one_soft_min_through_white() {
     }
 }
 
+#[test]
+#[ignore = "requires a GPU; run with --ignored --nocapture"]
+fn oklab_aces_yellow_green_gamut_boundary_has_no_isolated_jumps() {
+    let gpu = TestGpu::new();
+    let source = crate::oklab_aces::OklabAcesParameters::default();
+    const SAMPLE_COUNT: u32 = 257;
+    // Exact integer IDs survive the input texture's fp16 upload. Reconstruct
+    // the fine lightness steps inside WGSL so input quantization cannot hide
+    // the former isolated jump in the upper-boundary Halley candidate mask.
+    let input: Vec<_> = (0..SAMPLE_COUNT)
+        .flat_map(|sample| [sample as f32, 0.0, 0.0, 1.0])
+        .collect();
+    for (base, center) in [
+        ([0.75, 1.0, 0.0], 0.874_947_506_3),
+        ([1.0, 0.75, 0.0], 0.945_281),
+    ] {
+        let unit_lab = oklab_aces_validation_lab(base);
+        let input_chroma = unit_lab[1].hypot(unit_lab[2]);
+        let hue = [unit_lab[1] / input_chroma, unit_lab[2] / input_chroma];
+        let saturation = input_chroma / unit_lab[0];
+        let shader = builtin_shader(DrtKind::OklabAces);
+        let helpers = shader.split("@compute").next().unwrap();
+        let diagnostic_shader = format!(
+            r#"{helpers}
+            const VALIDATION_HUE: vec2f = vec2f({hue_a:.12}, {hue_b:.12});
+            fn validationBoundaryLightness(sample: f32) -> f32 {{
+                return {center:.12} + (sample - 128.0) * 0.000001;
+            }}
+            fn validationBoundaryCap(sample: f32) -> f32 {{
+                let direction = rootDirection(VALIDATION_HUE);
+                let maximumSaturation = connectedSaturation(
+                    VALIDATION_HUE, maxSaturation(VALIDATION_HUE, direction));
+                return saturationCap(validationBoundaryLightness(sample), maximumSaturation, direction);
+            }}
+            fn validationBoundaryRgb(sample: f32) -> vec3f {{
+                let normalized = validationBoundaryLightness(sample);
+                let peak = parameters.linearOutputPeak;
+                let outputBrightness = peak * normalized * normalized * normalized;
+                let gain = parameters.oklabAcesLinearSlope;
+                let join = parameters.oklabAcesCompressionStart;
+                let outputJoin = gain * join;
+                var inputBrightness = outputBrightness / gain;
+                if outputBrightness > outputJoin {{
+                    let extent = peak - outputJoin;
+                    let power = parameters.oklabAcesShoulderPower;
+                    let q = power * (pow((peak - outputBrightness) / extent, -1.0 / power) - 1.0);
+                    inputBrightness = join + extent * q / gain;
+                }}
+                let inputLightness = pow(inputBrightness, 1.0 / 3.0);
+                return oklabToRgb(vec3f(inputLightness,
+                    inputLightness * {saturation:.12} * VALIDATION_HUE));
+            }}
+            "#,
+            hue_a = hue[0],
+            hue_b = hue[1],
+        );
+        let cap_pipeline = create_pipeline(
+            &gpu.device,
+            &gpu.layout,
+            &oklab_aces_kernel_shader_from_source(
+                &diagnostic_shader,
+                "vec3f(validationBoundaryCap(source.x), 0.0, 0.0)",
+            ),
+            "yellow-green display boundary continuity",
+        )
+        .unwrap();
+        let encoded_pipeline = create_pipeline(
+            &gpu.device,
+            &gpu.layout,
+            &oklab_aces_kernel_shader_from_source(
+                &diagnostic_shader,
+                "prepareOutput(source, mapLinearRgb(validationBoundaryRgb(source.x)))",
+            ),
+            "yellow-green final display continuity",
+        )
+        .unwrap();
+        for headroom in [1.0_f32, 4.0, 64.0] {
+            let mut parameters = Parameters::new(SAMPLE_COUNT, 1);
+            parameters.set_oklab_aces_for_headroom(source, headroom);
+            let caps = gpu.render(&cap_pipeline, parameters, &input);
+            let encoded = gpu.render(&encoded_pipeline, parameters, &input);
+            let context = format!("source {base:?}, Ln {center}, peak {headroom}");
+            let mut maximum_cap_step = 0.0_f32;
+            for pair in caps.as_chunks::<4>().0.windows(2) {
+                assert!(pair[0][0].is_finite() && pair[0][0] > 0.0);
+                maximum_cap_step = maximum_cap_step.max((pair[1][0] - pair[0][0]).abs());
+            }
+            // Allow one fp16 ULP in this range; the former candidate changes
+            // jumped by 0.00159 and 0.00228 even as the input step tends to 0.
+            assert!(
+                maximum_cap_step < 0.000_3,
+                "isolated gamut cap jump {maximum_cap_step}: {context}"
+            );
+            let peak_signal = extended_srgb_oetf(headroom);
+            let pixels = encoded.as_chunks::<4>().0;
+            for pixel in pixels {
+                assert!(pixel[..3].iter().all(|channel| channel.is_finite()
+                    && *channel >= 0.0
+                    && *channel <= peak_signal + 0.005));
+            }
+            let maximum_blue_step = pixels
+                .windows(2)
+                .map(|pair| (pair[1][2] - pair[0][2]).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                maximum_blue_step < 0.001_5 * headroom.cbrt(),
+                "isolated display blue jump {maximum_blue_step}: {context}"
+            );
+            for lab in oklab_aces_validation_display_labs(&encoded) {
+                assert!(
+                    (lab[0] / f64::from(headroom).cbrt() - center).abs() < 0.002,
+                    "boundary smoothing changed lightness: {context}; displayed {lab:?}"
+                );
+                assert!(lab[1].hypot(lab[2]) / f64::from(headroom).cbrt() > 0.03);
+            }
+            eprintln!(
+                "{context}: maximum cap step {maximum_cap_step}, encoded blue step {maximum_blue_step}"
+            );
+        }
+    }
+}
+
 fn oklab_aces_validation_same_h_report(gpu: &TestGpu, directory: &std::path::Path) {
     let new_shader = builtin_shader(DrtKind::OklabAces);
     let baseline = std::env::var_os("DRT_SATURATION_BASELINE_SHADER_PATH")

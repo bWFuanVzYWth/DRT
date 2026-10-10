@@ -153,10 +153,12 @@ fn refineUpperChroma(chroma: f32, lightness: f32, direction: vec3f) -> f32 {
     let denominator: vec3f = firstRgb * firstRgb - 0.5 * f * secondRgb;
     let reciprocalStep: vec3f = firstRgb / denominator;
     var step: vec3f = -f * reciprocalStep;
+    // An upper RGB=1 crossing needs an increasing channel. A positive Halley
+    // reciprocal alone can also accept the wrong branch after f1 changes sign.
     step = vec3f(
-        select(1.0e20, step.x, reciprocalStep.x >= 0.0),
-        select(1.0e20, step.y, reciprocalStep.y >= 0.0),
-        select(1.0e20, step.z, reciprocalStep.z >= 0.0));
+        select(1.0e20, step.x, reciprocalStep.x >= 0.0 && firstRgb.x > 0.0),
+        select(1.0e20, step.y, reciprocalStep.y >= 0.0 && firstRgb.y > 0.0),
+        select(1.0e20, step.z, reciprocalStep.z >= 0.0 && firstRgb.z > 0.0));
     return chroma + min(step.r, min(step.g, step.b));
 }
 
@@ -170,6 +172,16 @@ fn softMin(value: f32, limit: f32, power: f32) -> f32 {
     return lower * pow(1.0 + pow(ratio, power), -1.0 / power);
 }
 
+fn softMin4(value: f32, limit: f32) -> f32 {
+    if value <= 0.0 || limit <= 0.0 {
+        return 0.0;
+    }
+    let lower = min(value, limit);
+    let ratio = lower / max(value, limit);
+    let ratio2 = ratio * ratio;
+    return lower / sqrt(sqrt(1.0 + ratio2 * ratio2));
+}
+
 fn saturationCap(lightness: f32, maximumSaturation: f32, direction: vec3f) -> f32 {
     if (lightness <= 0.0) {
         return maximumSaturation;
@@ -180,11 +192,16 @@ fn saturationCap(lightness: f32, maximumSaturation: f32, direction: vec3f) -> f3
     let cusp: f32 = cuspLightness(maximumSaturation, direction);
     let blackChroma: f32 = lightness * maximumSaturation;
     var whiteChroma: f32 = cusp * maximumSaturation * (1.0 - lightness) / (1.0 - cusp);
-    whiteChroma = refineUpperChroma(whiteChroma, lightness, direction);
+    // Below the cusp the black boundary controls the gamut. Refining the
+    // extrapolated upper line there can cross a derivative singularity and
+    // abruptly discard the white-side constraint (most visible in yellows).
+    if lightness > cusp {
+        whiteChroma = refineUpperChroma(whiteChroma, lightness, direction);
+    }
     let t: f32 = clamp((lightness - cusp) / (1.0 - cusp), 0.0, 1.0);
     let shoulder: f32 = t * (1.0 - t);
     whiteChroma *= 1.0 - 0.0035 * 16.0 * shoulder * shoulder;
-    let roundedChroma: f32 = softMin(blackChroma, whiteChroma, 4.0);
+    let roundedChroma: f32 = softMin4(blackChroma, whiteChroma);
     return max(roundedChroma / lightness, 0.0);
 }
 
@@ -222,7 +239,6 @@ fn mapLinearRgb(color: vec3f) -> vec3f {
         let progress = shoulderProgress(q);
         outputBrightness = outputJoin + extent * progress;
     }
-    let outputLightness = pow(outputBrightness, 1.0 / 3.0);
     let inputChroma = length(lab.yz);
     if inputChroma <= 1.0e-8 {
         // The neutral axis follows the scalar shoulder without RGB margin or
@@ -234,8 +250,10 @@ fn mapLinearRgb(color: vec3f) -> vec3f {
     let direction = rootDirection(hue);
     let inputSaturation = inputChroma / lab.x;
     let maximumSaturation = connectedSaturation(hue, maxSaturation(hue, direction));
+    // Inverse Oklab is homogeneous of degree three. Work in unit-peak Lab
+    // and scale the resulting RGB, avoiding a separate peak cube root.
     let normalizedLightness = clamp(
-        outputLightness / pow(parameters.linearOutputPeak, 1.0 / 3.0), 0.0, 1.0);
+        pow(outputBrightness / parameters.linearOutputPeak, 1.0 / 3.0), 0.0, 1.0);
     let cap = saturationCap(normalizedLightness, maximumSaturation, direction);
     let outputSaturation = softMin(inputSaturation, cap, roundingPower(normalizedLightness));
 
@@ -243,8 +261,8 @@ fn mapLinearRgb(color: vec3f) -> vec3f {
     // shadow bypass would jump at the shoulder join for saturated colors.
     // The shrinking display boundary provides the highlight chroma fade;
     // no separate shoulder-progress desaturation is needed.
-    return OKLAB_ACES_RGB_HEADROOM * oklabToRgb(vec3f(
-        outputLightness, outputLightness * outputSaturation * hue));
+    return (OKLAB_ACES_RGB_HEADROOM * parameters.linearOutputPeak) * oklabToRgb(vec3f(
+        normalizedLightness, normalizedLightness * outputSaturation * hue));
 }
 
 fn acesAp0ToRec709(ap0: vec3f) -> vec3f {
