@@ -13,6 +13,7 @@ pub enum DrtKind {
     OpenDrt,
     Uchimura,
     AcesFitted,
+    Aces20Curve,
     OklabLogSigmoid,
     OklabReinhard,
     OklabAces,
@@ -36,7 +37,8 @@ impl DrtKind {
         Self::Uchimura,
         Self::AcesFitted,
     ];
-    pub const RESEARCH: [Self; 6] = [
+    pub const RESEARCH: [Self; 7] = [
+        Self::Aces20Curve,
         Self::OklabLogSigmoid,
         Self::OklabReinhard,
         Self::OklabAces,
@@ -44,7 +46,7 @@ impl DrtKind {
         Self::RgbLogSigmoid,
         Self::RgbReinhard,
     ];
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::None,
         Self::AgxS2O3,
         Self::Aces13,
@@ -58,6 +60,7 @@ impl DrtKind {
         Self::OpenDrt,
         Self::Uchimura,
         Self::AcesFitted,
+        Self::Aces20Curve,
         Self::OklabLogSigmoid,
         Self::OklabReinhard,
         Self::OklabAces,
@@ -72,6 +75,7 @@ impl DrtKind {
             Self::AgxS2O3 => "AgX-S2O3",
             Self::Aces13 => "ACES 1.3 RRT + ODT",
             Self::Aces20 => "ACES 2.0",
+            Self::Aces20Curve => "ACES 2.0 Curve",
             Self::BlenderAgx => "Blender AgX",
             Self::Filmic => "Filmic Base Contrast",
             Self::FidelityFxLpm => "AMD FidelityFX LPM",
@@ -99,6 +103,9 @@ impl DrtKind {
             }
             Self::Aces20 => {
                 "Academy ACES 2 JMh tonescale, chroma compression and gamut mapping; Rec.709 SDR/HDR"
+            }
+            Self::Aces20Curve => {
+                "Experimental ACES 2.0 with a linear-shadow shoulder; original JMh, chroma compression and gamut mapping"
             }
             Self::BlenderAgx => {
                 "Blender's official E-Gamut AgX base LUT with tetrahedral interpolation; SDR Rec.1886 reference"
@@ -134,7 +141,7 @@ impl DrtKind {
                 "Linear segment and Reinhard shoulder in Oklab L^3 with chroma compression"
             }
             Self::OklabAces => {
-                "Experimental ACES-inspired shoulder with fixed Oklab hue and saturation detail near white; linear tone shadows and SDR/HDR"
+                "Experimental ACES-inspired shoulder with fixed Oklab hue and continuous chroma mapping; linear tone shadows and SDR/HDR"
             }
             Self::OklabNeutral => {
                 "Experimental max-RGB shoulder and root-LMS white path; linear Rec.709 shadows and SDR/HDR"
@@ -154,6 +161,7 @@ impl DrtKind {
             Self::AgxS2O3 => "reference/agx_s2o3.wgsl",
             Self::Aces13 => "reference/aces_13.wgsl",
             Self::Aces20 => "reference/aces_20.wgsl",
+            Self::Aces20Curve => "research/aces_20_curve.wgsl",
             Self::BlenderAgx => "reference/blender_agx.wgsl",
             Self::Filmic => "reference/filmic.wgsl",
             Self::FidelityFxLpm => "reference/fidelityfx_lpm.wgsl",
@@ -183,7 +191,7 @@ impl DrtKind {
         Self::REFERENCES.contains(&self)
     }
     pub fn uses_reference_wrapper(self) -> bool {
-        self.is_reference() && self != Self::AgxS2O3
+        (self.is_reference() && self != Self::AgxS2O3) || self == Self::Aces20Curve
     }
     pub fn uses_linear_log_sigmoid(self) -> bool {
         matches!(self, Self::RgbLogSigmoid | Self::OklabLogSigmoid)
@@ -203,6 +211,7 @@ impl DrtKind {
                 | Self::OklabAces
                 | Self::OklabNeutral
                 | Self::Aces20
+                | Self::Aces20Curve
                 | Self::FidelityFxLpm
                 | Self::OpenDrt
                 | Self::Uchimura
@@ -217,7 +226,7 @@ impl DrtKind {
             Self::Aces13 => {
                 "https://github.com/aces-aswf/aces-core/tree/1256fee50ee35548c6eab8eca854ff3349008489"
             }
-            Self::Aces20 => {
+            Self::Aces20 | Self::Aces20Curve => {
                 "https://github.com/aces-aswf/aces-core/tree/069b0bc3e1f6c62820f19fdae2fecec3f4fc0f80"
             }
             Self::BlenderAgx => {

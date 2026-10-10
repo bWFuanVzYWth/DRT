@@ -336,7 +336,7 @@ fn reference_lut_ports_match_official_ocio_vectors() {
 fn reference_catalogue_has_separate_shaders_and_pinned_remote_records() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     assert_eq!(DrtKind::REFERENCES.len(), 12);
-    assert_eq!(DrtKind::RESEARCH.len(), 6);
+    assert_eq!(DrtKind::RESEARCH.len(), 7);
     for kind in DrtKind::REFERENCES {
         assert!(kind.shader_file().starts_with("reference/"));
         assert!(!DrtKind::RESEARCH.contains(&kind));

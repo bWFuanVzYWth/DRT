@@ -29,6 +29,9 @@ struct DrtParameters {
     oklabGamutRoundingPower: f32,
     oklabEndpointCompressionPower: f32,
     oklabMidtoneCompressionPower: f32,
+    oklabAcesLinearSlope: f32,
+    oklabAcesCompressionStart: f32,
+    oklabAcesShoulderPower: f32,
 }
 @group(0) @binding(0) var inputTexture: texture_2d<f32>;
 @group(0) @binding(1) var inputSampler: sampler;

@@ -85,6 +85,7 @@ struct DrtApp {
     rgb_log_sigmoid_parameters: LinearLogSigmoidParameters,
     oklab_log_sigmoid_parameters: LinearLogSigmoidParameters,
     oklab_aces_parameters: OklabAcesParameters,
+    aces20_curve_parameters: OklabAcesParameters,
     oklab_neutral_parameters: OklabNeutralParameters,
     rgb_log_sigmoid_hue_retention: f32,
     oklab_reinhard_parameters: ReinhardParameters,
@@ -162,6 +163,7 @@ impl DrtApp {
             rgb_log_sigmoid_parameters: LinearLogSigmoidParameters::default(),
             oklab_log_sigmoid_parameters: LinearLogSigmoidParameters::default(),
             oklab_aces_parameters: OklabAcesParameters::default(),
+            aces20_curve_parameters: OklabAcesParameters::default(),
             oklab_neutral_parameters: OklabNeutralParameters::default(),
             rgb_log_sigmoid_hue_retention: 0.5,
             oklab_reinhard_parameters: ReinhardParameters::oklab_default(),
@@ -475,6 +477,9 @@ impl DrtApp {
                         DrtKind::OklabAces => {
                             self.gpu.set_oklab_aces_parameters(self.oklab_aces_parameters)
                         }
+                        DrtKind::Aces20Curve => {
+                            self.gpu.set_aces20_curve_parameters(self.aces20_curve_parameters)
+                        }
                         DrtKind::OklabNeutral => {
                             self.gpu.set_oklab_neutral_parameters(self.oklab_neutral_parameters)
                         }
@@ -617,10 +622,19 @@ impl DrtApp {
                 if exposure_changed {
                     self.gpu.set_exposure(self.exposure_ev);
                 }
-                if active_drt == DrtKind::OklabAces {
-                    let mut source = self.oklab_aces_parameters;
+                if matches!(active_drt, DrtKind::OklabAces | DrtKind::Aces20Curve) {
+                    let using_aces_curve = active_drt == DrtKind::Aces20Curve;
+                    let mut source = if using_aces_curve {
+                        self.aces20_curve_parameters
+                    } else {
+                        self.oklab_aces_parameters
+                    };
                     ui.separator();
-                    ui.label(RichText::new("ACES-inspired Oklab experiment").strong());
+                    ui.label(RichText::new(if using_aces_curve {
+                        "ACES 2.0 curve experiment"
+                    } else {
+                        "ACES-inspired Oklab experiment"
+                    }).strong());
                     ui.label(RichText::new("Linear shadows · extended highlights · SDR/HDR").small().weak());
                     let mut changed = ui
                         .add(
@@ -628,7 +642,11 @@ impl DrtApp {
                                 .step_by(0.025)
                                 .text("Linear slope"),
                         )
-                        .on_hover_text("Linear tone gain below the shoulder; default 1. Gamut-edge chroma is protected at all brightness levels.")
+                        .on_hover_text(if using_aces_curve {
+                            "Scene-luminance gain below the shoulder; default 1. ACES color processing is retained."
+                        } else {
+                            "Linear tone gain below the shoulder; default 1. Gamut-edge chroma is protected at all brightness levels."
+                        })
                         .changed();
                     source.constrain();
                     let maximum_start = source.maximum_compression_start();
@@ -637,7 +655,11 @@ impl DrtApp {
                             egui::Slider::new(&mut source.compression_start, 0.0..=maximum_start)
                                 .text("Compression start"),
                         )
-                        .on_hover_text("Linear/shoulder join in Oklab L^3; default 0.18")
+                        .on_hover_text(if using_aces_curve {
+                            "Linear/shoulder join in scene luminance Y; default 0.18"
+                        } else {
+                            "Linear/shoulder join in Oklab L^3; default 0.18"
+                        })
                         .changed();
                     source.constrain();
                     let headroom = self.gpu.output_headroom();
@@ -669,10 +691,21 @@ impl DrtApp {
                         curve.map_linear(0.18),
                         curve.output_peak,
                     )).small().weak());
-                    ui.label(RichText::new("Fixed Oklab hue · saturation detail near white · extended highlights").small().weak());
-                    self.oklab_aces_parameters = source;
-                    if changed {
-                        self.gpu.set_oklab_aces_parameters(source);
+                    ui.label(RichText::new(if using_aces_curve {
+                        "ACES 2 color processing · adjusted luminance curve"
+                    } else {
+                        "Fixed Oklab hue · continuous chroma mapping · extended highlights"
+                    }).small().weak());
+                    if using_aces_curve {
+                        self.aces20_curve_parameters = source;
+                        if changed {
+                            self.gpu.set_aces20_curve_parameters(source);
+                        }
+                    } else {
+                        self.oklab_aces_parameters = source;
+                        if changed {
+                            self.gpu.set_oklab_aces_parameters(source);
+                        }
                     }
                 }
                 if active_drt == DrtKind::OklabNeutral {
@@ -1109,6 +1142,7 @@ impl DrtApp {
                     self.rgb_log_sigmoid_parameters = LinearLogSigmoidParameters::default();
                     self.oklab_log_sigmoid_parameters = LinearLogSigmoidParameters::default();
                     self.oklab_aces_parameters = OklabAcesParameters::default();
+                    self.aces20_curve_parameters = OklabAcesParameters::default();
                     self.oklab_neutral_parameters = OklabNeutralParameters::default();
                     self.rgb_log_sigmoid_hue_retention = 0.5;
                     self.oklab_reinhard_parameters = ReinhardParameters::oklab_default();
@@ -1123,6 +1157,7 @@ impl DrtApp {
                     self.gpu.set_rgb_log_sigmoid_parameters(self.rgb_log_sigmoid_parameters);
                     self.gpu.set_oklab_log_sigmoid_parameters(self.oklab_log_sigmoid_parameters);
                     self.gpu.set_oklab_aces_parameters(self.oklab_aces_parameters);
+                    self.gpu.set_aces20_curve_parameters(self.aces20_curve_parameters);
                     self.gpu.set_oklab_neutral_parameters(self.oklab_neutral_parameters);
                     self.gpu.set_rgb_log_sigmoid_hue_retention(
                         self.rgb_log_sigmoid_hue_retention,

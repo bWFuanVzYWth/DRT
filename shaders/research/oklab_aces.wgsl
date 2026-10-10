@@ -233,22 +233,11 @@ fn mapLinearRgb(color: vec3f) -> vec3f {
     let hue = lab.yz / inputChroma;
     let direction = rootDirection(hue);
     let inputSaturation = inputChroma / lab.x;
-    let sourceReference = maxSaturation(hue, direction);
-    let maximumSaturation = connectedSaturation(hue, sourceReference);
+    let maximumSaturation = connectedSaturation(hue, maxSaturation(hue, direction));
     let normalizedLightness = clamp(
         outputLightness / pow(parameters.linearOutputPeak, 1.0 / 3.0), 0.0, 1.0);
     let cap = saturationCap(normalizedLightness, maximumSaturation, direction);
-    let legacySaturation = softMin(inputSaturation, cap, roundingPower(normalizedLightness));
-
-    // C/L stays unchanged under exposure. Preserve that source saturation rank
-    // near white instead of collapsing every saturated color of one hue onto
-    // the same tiny display cap. The source reference keeps its full boundary;
-    // only the target cap uses the connected blue-notch boundary guard.
-    let saturationAnchor = softMin(inputSaturation, sourceReference, 16.0)
-        / max(sourceReference, 1.0e-8);
-    let rankedSaturation = cap * saturationAnchor;
-    let outputSaturation = mix(legacySaturation, rankedSaturation,
-        smoothstep(0.90, 0.97, normalizedLightness));
+    let outputSaturation = softMin(inputSaturation, cap, roundingPower(normalizedLightness));
 
     // Apply one continuous fixed-hue constraint from black to white. A hard
     // shadow bypass would jump at the shoulder join for saturated colors.

@@ -5,7 +5,7 @@
 ## 功能
 
 - 切换不同 DRT，调整曝光与算法参数，实时查看映射结果。
-- 提供 12 个第三方参考 DRT、6 个独立研究实现与 None 基线；每份参考移植登记固定远程来源、许可、默认预设和适配差异。
+- 提供 12 个第三方参考 DRT、7 个独立研究实现与 None 基线；每份参考移植登记固定远程来源、许可、默认预设和适配差异。
 - 启用 Compare 对比模式，在同一张图片上用可拖动分割线比较左右 DRT。
 - 结合中性灰轴曲线、颜色分布和数值异常可视化检查输出；曲线横轴为对数输入 EV，纵轴为线性显示亮度，独立于当前图片及其曝光。
 - 提供内置测试图、图片加载和文件夹浏览，支持 EXR、HDR、PNG、JPEG 和 WebP。
@@ -31,6 +31,7 @@ sRGB / Oklab 颜色分布图按当前 DRT 的输出范围自动缩放，并适�
 | --- | --- | --- |
 | None | 无色调压缩，执行显示转换与范围裁切 | [none_drt.wgsl](shaders/research/none_drt.wgsl) |
 | AgX-S2O3 | 保留原始 AgX-S2O3 结构的参考移植 | [agx_s2o3.wgsl](shaders/reference/agx_s2o3.wgsl) |
+| ACES 2.0 Curve | 在完整 ACES 2.0 中只替换标量亮度曲线，保留 JMh、色度压缩及色域映射 | [aces_20_curve.wgsl](shaders/research/aces_20_curve.wgsl) |
 | Oklab Log Sigmoid | 将 RGB Log Sigmoid 的解析线性暗部与 log2 sigmoid 肩部应用到 Oklab L³，解码回线性亮度后执行 Oklab 色度压缩 | [oklab_log_sigmoid.wgsl](shaders/research/oklab_log_sigmoid.wgsl) |
 | Oklab Reinhard | 在 Oklab L³ 上应用线性段与 Reinhard 肩部，再沿固定 Oklab 色相方向柔性压缩色度 | [oklab_reinhard.wgsl](shaders/research/oklab_reinhard.wgsl) |
 | Oklab ACES-inspired | Oklab L³ 的线性低段与渐近长肩部，结合固定色相方向的柔性色度边界处理 | [oklab_aces.wgsl](shaders/research/oklab_aces.wgsl) |
@@ -56,20 +57,24 @@ sRGB / Oklab 颜色分布图按当前 DRT 的输出范围自动缩放，并适�
 
 颜色阶段复用旧 Oklab 的固定色相边界和 soft-min，使用固定默认系数，不继承另一款 DRT 的色度控件。以 `L'/peak^(1/3)` 归一化查询边界，再恢复实际 HDR 明度和色度，使映射后的正常颜色已在目标显示范围内，避免逐 RGB 通道裁切造成品红/蓝色偏移。
 
-近白区保留源颜色的相对饱和度：`S = C/L` 不随曝光变化，以该色相的源饱和度上限 `Sref` 归一化，形成 `softMin(S, Sref, 16)/Sref`，再乘以当前显示边界。归一化输出明度从 0.90 到 0.97 时平滑切换到这一映射，避免不同饱和度都被压到同一边界；0.90 以下保持原有处理。源参考不应用蓝色边界收缩，显示边界仍保留该保护。精确白点的可用色度为零，所有轨迹最终汇合，但到达白点前保留饱和度层次。没有额外 `1 − w²` 或 `1 − L^12` 高光衰减，长肩部及 10 EV 默认保持原样。原高光去色和纯色保护控件继续删除。
+颜色阶段在全部明度范围使用同一条固定色相 soft-min 映射：`outputSaturation = softMin(inputSaturation, displayCap, roundingPower)`。近白区 0.90–0.97 的源饱和度分级混合已经撤回，避免在这一段切换映射而使趋白轨迹转弯；近白的不同饱和度可能再次趋近同一显示边界。长肩部、10 EV 默认和显示边界的蓝色保护保持原样，没有额外 `1 − w²` 或 `1 − L^12` 衰减。原高光去色和纯色保护控件继续删除。
 
 `Oklab Neutral` 是独立保存参数的另一款原创实验。输入从 AP0 转为线性 BT.709 后适配为非负 RGB，以最大通道作为亮度标量；默认 `Linear slope = 1`、`Compression start = 0.6`、SDR `Highlight reach = 10 EV`，高光延伸同样表示达到当前峰值 98% 的输入 EV。肩部复用上述标量曲线，低段保持线性 RGB 增益；颜色在 LMS 立方根坐标中趋向中性白，近似保持 Oklab 色相。以肩部进度 `P = 1 − (1 + q/p)^(−p)` 计算固定四次式插白权重 `H(P) = P³·(3 − 2P)`，不增加独立饱和度滑条。蓝色附近的非凸边界可能产生微小负 RGB，采用共同 RGB 抬升后统一归一化；输入的负值限制属于非负 BT.709 工作域适配，不是宽色域压缩。支持 SDR/HDR，参数与其他 DRT 独立。
 
+`ACES 2.0 Curve` 直接基于完整 ACES 2.0 移植，只把场景 Y 的标量亮度曲线换成线性暗部与长肩部。默认斜率 1、压缩起点 0.18、SDR reach 10 EV；JMh、白点、色度处理、色域映射及原始参考表均保留，独立保存三个曲线参数。灰阶位置也随曲线改变，默认 18% 灰输出约 0.18。完整来源与验证见 [实验记录](shaders/research/aces_20_curve.md)。
+
+高光褪色的三次、四次和五次贝塞尔替换实验保存在 [贝塞尔实验记录](shaders/research/oklab_neutral_bezier.md)；可独立运行 GPU 审计。控制点能扩大白端开口并减轻部分混色反弹，但真实样片的暖色边缘和明度回落仍有代价，当前应用继续使用上述四次式。
+
 ## 参数约定
 
-选择器按第三方参考与研究实现分组，None 保留为基线。六款研究 DRT 各自独立保存设置，相同含义的曲线参数使用相同命名。AgX-S2O3 保留参考参数与控制，包括默认 0.2 的 inset。新增参考以各自登记的原版默认预设运行，不统一改写中灰或高光颜色行为。
+选择器按第三方参考与研究实现分组，None 保留为基线。七款研究 DRT 各自独立保存设置，相同含义的曲线参数使用相同命名。AgX-S2O3 保留参考参数与控制，包括默认 0.2 的 inset。新增参考以各自登记的原版默认预设运行，不统一改写中灰或高光颜色行为。
 
 | 参数 | 适用范围 | 默认值 / 含义 |
 | --- | --- | --- |
-| Linear slope | 六款研究 DRT | 1；直接表示线性暗部的输出增益，替代 Reinhard 原来的间接 Input scale |
-| Compression start | 六款研究 DRT | Oklab Neutral 为 0.6，其余为 0.18；scene-linear RGB / Oklab L³ / BT.709 最大通道的线性段与肩部分段点 |
-| Highlight reach | 六款研究 DRT | RGB Reinhard、Oklab ACES-inspired 与 Oklab Neutral 默认 SDR 为 10 EV，其余为 6.5 EV；以 18% 灰为基准，最小值随曲线约束。两款实验以当前显示峰值的 98% 为目标，SDR/HDR 可调范围随实际峰值计算 |
-| Shoulder power | 两款 Log Sigmoid | 5.2；两款实验肩部幂次由 Highlight reach 反推，不提供独立幂次控件；原有 Reinhard 不包含独立的幂次控制 |
+| Linear slope | 七款研究 DRT | 1；直接表示线性暗部的输出增益，替代 Reinhard 原来的间接 Input scale |
+| Compression start | 七款研究 DRT | Oklab Neutral 为 0.6，其余为 0.18；scene-linear RGB / Oklab L³ / BT.709 最大通道的线性段与肩部分段点 |
+| Highlight reach | 七款研究 DRT | RGB Reinhard、Oklab ACES-inspired、Oklab Neutral 与 ACES 2.0 Curve 默认 SDR 为 10 EV，其余为 6.5 EV；以 18% 灰为基准，最小值随曲线约束。三款实验以当前显示峰值的 98% 为目标，SDR/HDR 可调范围随实际峰值计算 |
+| Shoulder power | 两款 Log Sigmoid | 5.2；三款实验肩部幂次由 Highlight reach 反推，不提供独立幂次控件；原有 Reinhard 不包含独立的幂次控制 |
 | Gamut compression | 两款 RGB | 0.04；虚拟 RGB inset 系数，可调范围 0–0.8 |
 | Hue retention | 两款 RGB | 0.5；全亮度范围一致的 HSV 色相修复强度 |
 | Highlight chroma power | 原有两款 Oklab | 12；`1 − L^p` 的高光色度衰减幂次 |

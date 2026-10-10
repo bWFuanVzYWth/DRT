@@ -645,6 +645,7 @@ pub struct DrtGpu {
     rgb_log_sigmoid_parameters: LinearLogSigmoidParameters,
     oklab_log_sigmoid_parameters: LinearLogSigmoidParameters,
     oklab_aces_parameters: OklabAcesParameters,
+    aces20_curve_parameters: OklabAcesParameters,
     oklab_neutral_parameters: OklabNeutralParameters,
     oklab_reinhard_parameters: ReinhardParameters,
     oklab_reinhard_chroma: OklabChromaParameters,
@@ -743,6 +744,7 @@ impl DrtGpu {
             rgb_log_sigmoid_parameters: LinearLogSigmoidParameters::default(),
             oklab_log_sigmoid_parameters: LinearLogSigmoidParameters::default(),
             oklab_aces_parameters: OklabAcesParameters::default(),
+            aces20_curve_parameters: OklabAcesParameters::default(),
             oklab_neutral_parameters: OklabNeutralParameters::default(),
             oklab_reinhard_parameters: ReinhardParameters::oklab_default(),
             oklab_reinhard_chroma: OklabChromaParameters::default(),
@@ -857,6 +859,18 @@ impl DrtGpu {
         source.constrain();
         self.oklab_neutral_parameters = source;
         self.apply_oklab_neutral_parameters();
+        self.render_state.queue.write_buffer(
+            &self.uniform,
+            0,
+            bytemuck::bytes_of(&self.parameters),
+        );
+        self.dispatch();
+    }
+
+    pub fn set_aces20_curve_parameters(&mut self, mut source: OklabAcesParameters) {
+        source.constrain();
+        self.aces20_curve_parameters = source;
+        self.apply_aces20_curve_parameters();
         self.render_state.queue.write_buffer(
             &self.uniform,
             0,
@@ -1080,6 +1094,7 @@ impl DrtGpu {
         );
         self.apply_oklab_aces_parameters();
         self.apply_oklab_neutral_parameters();
+        self.apply_aces20_curve_parameters();
     }
 
     fn apply_oklab_aces_parameters(&mut self) {
@@ -1093,6 +1108,15 @@ impl DrtGpu {
         if self.active_drt == DrtKind::OklabNeutral {
             self.parameters
                 .set_oklab_neutral_for_headroom(self.oklab_neutral_parameters, self.hdr_headroom);
+        }
+    }
+
+    fn apply_aces20_curve_parameters(&mut self) {
+        if self.active_drt == DrtKind::Aces20Curve {
+            // Reuse the existing three scalar-curve fields; the saved controls
+            // remain independent from the Oklab ACES-inspired experiment.
+            self.parameters
+                .set_oklab_aces_for_headroom(self.aces20_curve_parameters, self.hdr_headroom);
         }
     }
 
@@ -1128,11 +1152,18 @@ impl DrtGpu {
             parameters
                 .set_oklab_neutral_for_headroom(self.oklab_neutral_parameters, self.hdr_headroom);
         }
+        if drt == DrtKind::Aces20Curve {
+            parameters.set_oklab_aces_for_headroom(self.aces20_curve_parameters, self.hdr_headroom);
+        }
         parameters
     }
 
     fn refresh_reference_data(&mut self) {
-        for kind in [DrtKind::Aces20, DrtKind::FidelityFxLpm] {
+        for kind in [
+            DrtKind::Aces20,
+            DrtKind::Aces20Curve,
+            DrtKind::FidelityFxLpm,
+        ] {
             let data = crate::reference::data(kind, self.hdr_headroom);
             let resources = &mut self.reference_resources[kind.index()];
             let bytes = bytemuck::cast_slice::<f32, u8>(&data);

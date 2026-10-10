@@ -598,9 +598,39 @@ fn oklab_aces_validation_display_labs(encoded: &[f32]) -> Vec<[f64; 3]> {
 
 #[test]
 #[ignore = "requires a GPU; run with --ignored --nocapture"]
-fn oklab_aces_same_h_highlights_preserve_saturation_rank() {
+fn oklab_aces_same_h_highlights_use_one_soft_min_through_white() {
     let gpu = TestGpu::new();
     let source = crate::oklab_aces::OklabAcesParameters::default();
+    // Read the mapper's source saturation and display boundary separately.
+    // The f64 oracle below evaluates the original soft minimum; it never
+    // invokes the shader's softMin or a near-white saturation-rank blend.
+    let shader = builtin_shader(DrtKind::OklabAces);
+    let helpers = shader.split("@compute").next().unwrap();
+    let diagnostic_shader = format!(
+        r#"{helpers}
+        fn validationSaturationInputs(color: vec3f) -> vec3f {{
+            let lab = rgbToOklab(color);
+            let brightness = lab.x * lab.x * lab.x;
+            let gain = parameters.oklabAcesLinearSlope;
+            let join = parameters.oklabAcesCompressionStart;
+            var outputBrightness = gain * brightness;
+            if brightness > join {{
+                let extent = parameters.linearOutputPeak - gain * join;
+                let q = gain * (brightness - join) / extent;
+                outputBrightness = gain * join + extent * shoulderProgress(q);
+            }}
+            let normalizedLightness = clamp(
+                pow(outputBrightness / parameters.linearOutputPeak, 1.0 / 3.0), 0.0, 1.0);
+            let inputChroma = length(lab.yz);
+            let hue = lab.yz / inputChroma;
+            let direction = rootDirection(hue);
+            let maximumSaturation = connectedSaturation(hue, maxSaturation(hue, direction));
+            return vec3f(inputChroma / lab.x,
+                saturationCap(normalizedLightness, maximumSaturation, direction),
+                roundingPower(normalizedLightness));
+        }}
+        "#
+    );
     for degrees in [30.0_f64, 90.0, 194.0, 264.0, 328.0] {
         let angle = degrees.to_radians();
         let hue = [angle.cos(), angle.sin()];
@@ -610,16 +640,29 @@ fn oklab_aces_same_h_highlights_preserve_saturation_rank() {
                 &gpu.device,
                 &gpu.layout,
                 &oklab_aces_kernel_shader(&oklab_aces_validation_same_h_expression(hue, operation)),
-                "same-h saturation rank",
+                "same-h original soft-min mapping",
             )
             .unwrap()
         };
         let lab_pipeline = make_pipeline("lab");
         let rgb_pipeline = make_pipeline("rgb");
         let encoded_pipeline = make_pipeline("encoded");
+        let input_expression = format!(
+            "validationSaturationInputs(oklabToRgb(vec3f(source.x, source.x*source.y*{:.9}, source.x*source.y*{:.9})))",
+            hue[0], hue[1]
+        );
+        let diagnostic_pipeline = create_pipeline(
+            &gpu.device,
+            &gpu.layout,
+            &oklab_aces_kernel_shader_from_source(&diagnostic_shader, &input_expression),
+            "independent soft-min inputs",
+        )
+        .unwrap();
         for headroom in [1.0, 4.0, 64.0] {
             let curve = source.curve_for_headroom(headroom);
-            for normalized in [0.95, 0.98, 0.995] {
+            // Cover both former blend endpoints and its interior, as well as
+            // the unmodified region immediately below and beyond them.
+            for normalized in [0.89, 0.90, 0.93, 0.97, 0.98, 0.995] {
                 let input_l = oklab_aces_validation_input_lightness(curve, normalized);
                 let input: Vec<_> = [0.2, 0.4, 0.6, 0.8]
                     .into_iter()
@@ -630,23 +673,26 @@ fn oklab_aces_same_h_highlights_preserve_saturation_rank() {
                 let raw_lab = gpu.render(&lab_pipeline, parameters, &input);
                 let raw_rgb = gpu.render(&rgb_pipeline, parameters, &input);
                 let encoded = gpu.render(&encoded_pipeline, parameters, &input);
+                let diagnostic = gpu.render(&diagnostic_pipeline, parameters, &input);
                 let actual = raw_lab.as_chunks::<4>().0;
                 let saturation: Vec<_> = actual
                     .iter()
                     .map(|lab| lab[1].hypot(lab[2]) / lab[0])
                     .collect();
-                let span = saturation[3] - saturation[0];
                 let context =
                     format!("h {degrees}, Ln {normalized}, peak {headroom}: {saturation:?}");
-                assert!(span > 0.0, "collapsed same-h highlights: {context}");
-                assert!(
-                    saturation[3] / saturation[0] >= 1.8,
-                    "saturation levels converged on their cap: {context}"
-                );
-                for pair in saturation.windows(2) {
+                for (actual, inputs) in saturation.iter().zip(diagnostic.as_chunks::<4>().0) {
+                    let [value, limit, power] = [inputs[0], inputs[1], inputs[2]].map(f64::from);
+                    assert!(value > 0.0 && limit > 0.0 && power > 0.0);
+                    let lower = value.min(limit);
+                    let higher = value.max(limit);
+                    let expected = lower * (1.0 + (lower / higher).powf(power)).powf(-1.0 / power);
+                    // The scalar inputs and output Lab use independent fp16
+                    // readbacks. Allow their rounding, but reject the prior
+                    // rank-scaled cap and its 0.90..0.97 interpolation.
                     assert!(
-                        pair[1] - pair[0] >= 0.05 * span,
-                        "indistinguishable adjacent ranks: {context}"
+                        (f64::from(*actual) - expected).abs() < 0.004 * expected + 0.000_02,
+                        "original soft minimum changed: {context}; inputs {inputs:?}, expected {expected}"
                     );
                 }
                 for (lab, rgb) in actual.iter().zip(raw_rgb.as_chunks::<4>().0) {
@@ -664,24 +710,18 @@ fn oklab_aces_same_h_highlights_preserve_saturation_rank() {
                         "raw same-h angle changed {error} degrees: {context}"
                     );
                 }
-                if normalized <= 0.98 {
-                    let display_lab = oklab_aces_validation_display_labs(&encoded);
-                    let display_saturation: Vec<_> = display_lab
-                        .iter()
-                        .map(|lab| lab[1].hypot(lab[2]) / lab[0])
-                        .collect();
-                    for pair in display_saturation.windows(2) {
-                        assert!(
-                            pair[1] > pair[0],
-                            "encoded same-h ranks merged: {context}, {display_saturation:?}"
-                        );
-                    }
-                    for pair in encoded.as_chunks::<4>().0.windows(2) {
-                        assert_ne!(
-                            &pair[0][..3],
-                            &pair[1][..3],
-                            "fp16 output merged visible ranks: {context}"
-                        );
+                let peak_signal = extended_srgb_oetf(headroom);
+                for pixel in encoded.as_chunks::<4>().0 {
+                    assert!(pixel[..3].iter().all(|channel| channel.is_finite()
+                        && *channel >= 0.0
+                        && *channel <= peak_signal + 0.005));
+                }
+                for lab in oklab_aces_validation_display_labs(&encoded) {
+                    // Display fp16 quantization makes hue ill-conditioned at
+                    // the white endpoint; only assess measurable chroma.
+                    if lab[1].hypot(lab[2]) / f64::from(headroom).cbrt() >= 0.01 {
+                        let error = oklab_aces_validation_hue_error([1.0, hue[0], hue[1]], lab);
+                        assert!(error < 2.0, "display hue shifted {error} degrees: {context}");
                     }
                 }
             }

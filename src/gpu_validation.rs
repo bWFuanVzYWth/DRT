@@ -445,7 +445,7 @@ fn drt_gpu_outputs() {
                 parameters.exposure_multiplier = 4.0;
             }
             parameters.set_reinhard_for_drt(drt, oklab, reinhard, headroom);
-            if drt == DrtKind::OklabAces {
+            if matches!(drt, DrtKind::OklabAces | DrtKind::Aces20Curve) {
                 let mut source = crate::oklab_aces::OklabAcesParameters::default();
                 if variant >= 3 {
                     source.linear_slope = 1.5;
@@ -1156,3 +1156,5 @@ fn drt_gpu_hot_reload_recovers() {
 
 include!("oklab_aces_validation.rs");
 include!("oklab_neutral_validation.rs");
+include!("oklab_bezier_validation.rs");
+include!("aces_curve_validation.rs");
