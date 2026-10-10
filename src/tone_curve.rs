@@ -3,8 +3,8 @@ use eframe::{egui, egui_wgpu};
 use wgpu::util::DeviceExt;
 
 pub const SAMPLE_COUNT: u32 = 512;
-pub const INPUT_MIN_EV: f32 = -16.0;
-pub const INPUT_MAX_EV: f32 = 18.0;
+pub const INPUT_MIN_EV: f32 = -12.0;
+pub const INPUT_MAX_EV: f32 = 12.0;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -57,7 +57,7 @@ impl ToneCurveRenderer {
         let text = egui::Color32::from_gray(125);
         let font = egui::FontId::monospace(8.5);
 
-        for value in [-16.0, -12.0, -6.0, 0.0, 6.0, 12.0, 18.0] {
+        for value in [-12.0, -6.0, 0.0, 6.0, 12.0] {
             let x = map_x(plot, value);
             painter.line_segment(
                 [egui::pos2(x, plot.top()), egui::pos2(x, plot.bottom())],
@@ -112,7 +112,7 @@ impl ToneCurveRenderer {
             text,
         );
         response.on_hover_text(
-            "Input is logarithmic: log2 stops relative to 18% gray. Output is display-linear light in SDR-white units, from exact black to the active DRT's current display peak. The linear reference stops where it reaches that peak. The DRT curve uses a synthetic neutral AP0 axis and is independent of the loaded image and exposure.",
+            "Input is logarithmic: log2 stops relative to 18% gray, with a fixed range of -12 to +12 EV. Output is display-linear light in SDR-white units, from exact black to the active DRT's current display peak. The linear reference stops where it reaches that peak. The DRT curve uses a synthetic neutral AP0 axis and is independent of the loaded image and exposure.",
         )
     }
 }

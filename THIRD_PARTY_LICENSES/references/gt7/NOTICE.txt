@@ -1,0 +1,22 @@
+GT7 Tone Mapping sample implementation
+Version 1.0 (2025-08-10)
+Copyright (c) 2025 Polyphony Digital Inc.
+MIT License; the complete license is preserved in LICENSE.txt.
+
+Authors: Kenichiro Yasutomi, Kentaro Suzuki and Hajime Uchimura.
+Official publication: Driving Toward Reality: Physically Based Tone Mapping
+and Perceptual Fidelity in Gran Turismo 7, SIGGRAPH 2025.
+
+Official source:
+https://blog.selfshadow.com/publications/s2025-shading-course/pdi/supplemental/gt7_tone_mapping.cpp
+SHA-256:
+94df7e7e310b9423ebb5aaaa29416f376ebbae66e0948fb259f8688314b29822
+
+The WGSL implementation ports the default ICtCp branch and published defaults.
+CPU curve initialization follows the original C++ methods. Workbench adapters
+convert AP0/D60 input to Rec.2020/D65 and Rec.2020 output to linear Rec.709,
+and express returned luminance relative to the source's SDR paper white.
+The original source and presentation downloads remain in an ignored cache.
+
+See references/entries/gt7.md for complete source provenance, unit conversion,
+HDR domain, fidelity and validation details.

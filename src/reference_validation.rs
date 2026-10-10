@@ -91,6 +91,7 @@ fn kind_for_algorithm(algorithm: &str) -> DrtKind {
         "hable" => DrtKind::Hable,
         "lottes" => DrtKind::Lottes,
         "uchimura" => DrtKind::Uchimura,
+        "gt7" => DrtKind::Gt7,
         "aces_fitted" => DrtKind::AcesFitted,
         "opendrt" => DrtKind::OpenDrt,
         "fidelityfx_lpm" => DrtKind::FidelityFxLpm,
@@ -115,6 +116,15 @@ fn triplet(value: &Value) -> [f32; 3] {
         );
         number
     })
+}
+
+fn decode_display_srgb(encoded: f32) -> f64 {
+    let encoded = f64::from(encoded);
+    if encoded <= 0.04045 {
+        encoded / 12.92
+    } else {
+        ((encoded + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 fn rec709_to_ap0(rgb: [f32; 3]) -> [f32; 3] {
@@ -218,10 +228,17 @@ fn check_fixture(path: &str, required_algorithms: &[DrtKind]) {
         let active_peak = drt.active_output_headroom();
         assert_eq!(
             active_peak,
-            if kind.supports_hdr() { headroom } else { 1.0 }
+            if kind == DrtKind::Gt7 {
+                headroom.min(40.0)
+            } else if kind.supports_hdr() {
+                headroom
+            } else {
+                1.0
+            }
         );
         let mut minimum_expected = f32::INFINITY;
         let mut maximum_expected = 0.0_f32;
+        let mut largest_gt7_error = (0.0_f64, 0.0_f64, 0.0_f64, 0_usize, 0_usize);
         for (index, (pixel, case)) in actual.iter().zip(cases).enumerate() {
             let linear = triplet(&case["expected_linear_rec709"]);
             assert!(
@@ -237,15 +254,49 @@ fn check_fixture(path: &str, required_algorithms: &[DrtKind]) {
                 // and display output. Quantized upstream fixtures remove
                 // input error; residual tolerance covers f32 evaluation and
                 // half-precision output, including HDR values above 1.
-                let tolerance = 0.0015 + 0.001 * expected.abs();
-                assert!(
-                    (pixel[channel] - expected).abs() <= tolerance,
-                    "{algorithm} headroom {headroom}, case {index} {}, channel {channel}: GPU {} vs upstream {expected} (tolerance {tolerance}, linear {})",
-                    case["name"].as_str().unwrap_or(""),
-                    pixel[channel],
-                    linear[channel]
-                );
+                if kind == DrtKind::Gt7 {
+                    // PQ inverse powers amplify FP32/SFU differences at high
+                    // luminance, and Rec.2020 -> Rec.709 cancellation can move
+                    // a small channel across zero. An independent all-double
+                    // audit also finds this in the published C++ FP32 oracle.
+                    // Compare display-linear energy: 0.05% of display peak
+                    // covers PQ roundoff; 0.2% relative covers f16 sRGB output.
+                    // This budget is specific to GT7; other ports retain their
+                    // existing encoded-output comparison below.
+                    let expected_linear = f64::from(linear[channel].clamp(0.0, active_peak));
+                    let actual_linear = decode_display_srgb(pixel[channel]);
+                    let difference = (actual_linear - expected_linear).abs();
+                    let tolerance = 0.0005 * f64::from(active_peak) + 0.002 * expected_linear;
+                    let budget_use = difference / tolerance;
+                    if budget_use > largest_gt7_error.0 {
+                        largest_gt7_error = (budget_use, difference, tolerance, index, channel);
+                    }
+                    assert!(
+                        difference <= tolerance,
+                        "GT7 headroom {headroom}, case {index} {}, channel {channel}: decoded GPU {actual_linear} vs upstream {expected_linear} (linear tolerance {tolerance})",
+                        case["name"].as_str().unwrap_or("")
+                    );
+                } else {
+                    let tolerance = 0.0015 + 0.001 * expected.abs();
+                    assert!(
+                        (pixel[channel] - expected).abs() <= tolerance,
+                        "{algorithm} headroom {headroom}, case {index} {}, channel {channel}: GPU {} vs upstream {expected} (tolerance {tolerance}, linear {})",
+                        case["name"].as_str().unwrap_or(""),
+                        pixel[channel],
+                        linear[channel]
+                    );
+                }
             }
+        }
+        if kind == DrtKind::Gt7 {
+            eprintln!(
+                "GT7 headroom {headroom}: maximum linear error budget use {:.1}% (error {:.6}, budget {:.6}, case {}, channel {})",
+                largest_gt7_error.0 * 100.0,
+                largest_gt7_error.1,
+                largest_gt7_error.2,
+                largest_gt7_error.3,
+                largest_gt7_error.4
+            );
         }
         assert!(
             maximum_expected - minimum_expected > 0.1,
@@ -316,6 +367,40 @@ fn reference_hdr_ports_match_upstream_vectors() {
 
 #[test]
 #[ignore = "requires a GPU; run with --ignored --nocapture"]
+fn reference_gt7_port_matches_official_cpp_vectors() {
+    let document = fixture("references/validation/gt7_reference_vectors.json");
+    let records = document["records"].as_array().unwrap();
+    let headrooms: Vec<f64> = records
+        .iter()
+        .map(|record| record["headroom"].as_f64().unwrap())
+        .collect();
+    assert_eq!(headrooms, [1.0, 2.0, 4.0, 16.0, 40.0, 64.0]);
+    assert_eq!(records.last().unwrap()["effective_headroom"], 40.0);
+    for record in records {
+        let cases = record["vectors"].as_array().unwrap();
+        for name in [
+            "official_example_1",
+            "official_example_2",
+            "official_example_3",
+            "chroma_fade_ratio_0.978",
+            "chroma_fade_ratio_0.982",
+            "chroma_fade_ratio_1.158",
+            "chroma_fade_ratio_1.162",
+        ] {
+            assert!(
+                cases.iter().any(|case| case["name"] == name),
+                "missing GT7 reference case {name}"
+            );
+        }
+    }
+    check_fixture(
+        "references/validation/gt7_reference_vectors.json",
+        &[DrtKind::Gt7],
+    );
+}
+
+#[test]
+#[ignore = "requires a GPU; run with --ignored --nocapture"]
 fn reference_aces_ports_match_official_ocio_vectors() {
     check_fixture(
         "references/validation/aces_reference_vectors.json",
@@ -335,8 +420,8 @@ fn reference_lut_ports_match_official_ocio_vectors() {
 #[test]
 fn reference_catalogue_has_separate_shaders_and_pinned_remote_records() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    assert_eq!(DrtKind::REFERENCES.len(), 12);
-    assert_eq!(DrtKind::ALL.len(), 15);
+    assert_eq!(DrtKind::REFERENCES.len(), 13);
+    assert_eq!(DrtKind::ALL.len(), 16);
     assert_eq!(
         DrtKind::RESEARCH,
         [DrtKind::OklabAces, DrtKind::RgbReinhard]

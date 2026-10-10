@@ -362,7 +362,15 @@ fn extended_srgb_oetf(linear: f32) -> f32 {
 }
 
 fn direct_output_headroom(drt: DrtKind, headroom: f32) -> f32 {
-    if drt.supports_hdr() { headroom } else { 1.0 }
+    if drt == DrtKind::Gt7 {
+        // The author's HDR preset supports 250–10,000 nits. GT7's output
+        // unit is its 250-nit SDR paper white, so that maximum is 40x.
+        headroom.min(40.0)
+    } else if drt.supports_hdr() {
+        headroom
+    } else {
+        1.0
+    }
 }
 
 fn curve_coefficient(x_extent: f32, y_extent: f32, slope: f32, power: f32) -> f32 {
@@ -724,11 +732,7 @@ impl DrtGpu {
     }
 
     pub fn active_output_headroom(&self) -> f32 {
-        if self.active_drt.supports_hdr() {
-            self.hdr_headroom
-        } else {
-            direct_output_headroom(self.active_drt, self.hdr_headroom)
-        }
+        direct_output_headroom(self.active_drt, self.hdr_headroom)
     }
 
     fn apply_log_sigmoid_parameters(&mut self) {
@@ -765,7 +769,7 @@ impl DrtGpu {
     }
 
     fn refresh_reference_data(&mut self) {
-        for kind in [DrtKind::Aces20, DrtKind::FidelityFxLpm] {
+        for kind in [DrtKind::Aces20, DrtKind::FidelityFxLpm, DrtKind::Gt7] {
             let data = crate::reference::data(kind, self.hdr_headroom);
             let resources = &mut self.reference_resources[kind.index()];
             let bytes = bytemuck::cast_slice::<f32, u8>(&data);

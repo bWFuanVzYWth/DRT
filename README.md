@@ -5,7 +5,7 @@
 ## 功能
 
 - 切换不同 DRT，调整曝光与算法参数，实时查看映射结果。
-- 提供 12 个第三方参考 DRT、2 个研究质量基线与 None 基线；每份参考移植登记固定远程来源、许可、默认预设和适配差异。
+- 提供 13 个第三方参考 DRT、2 个研究质量基线与 None 基线；每份参考移植登记固定远程来源、许可、默认预设和适配差异。
 - 启用 Compare 对比模式，在同一张图片上用可拖动分割线比较左右 DRT。
 - 结合中性灰轴曲线、颜色分布和数值异常可视化检查输出；曲线横轴为对数输入 EV，纵轴为线性显示亮度，独立于当前图片及其曝光。
 - 提供内置测试图、图片加载和文件夹浏览，支持 EXR、HDR、PNG、JPEG 和 WebP。
@@ -17,7 +17,7 @@
 
 SDR 输出使用 sRGB。支持 HDR 的 DRT 可通过线性 scRGB 显示，亮度以系统 SDR 参考白为基准；HDR 是否可用取决于系统、显示器和窗口表面能力，不可用时回落到 SDR。
 
-中性灰轴曲线横轴保留相对于 18% 灰的 −16 至 +18 EV；纵轴从精确黑 0 到当前 DRT 的显示峰值，单位为 SDR 参考白倍数。SDR 的范围为 0–1，HDR 按当前输出峰值缩放，刻度为峰值的 0%、25%、50%、75%、100% 并显示实际亮度值。未压缩的线性参考在这一坐标系下为指数曲线，到达显示峰值后停止绘制。
+中性灰轴曲线横轴固定为相对于 18% 灰的 −12 至 +12 EV；纵轴从精确黑 0 到当前 DRT 的显示峰值，单位为 SDR 参考白倍数。SDR 的范围为 0–1，HDR 按当前输出峰值缩放，刻度为峰值的 0%、25%、50%、75%、100% 并显示实际亮度值。未压缩的线性参考在这一坐标系下为指数曲线，到达显示峰值后停止绘制。
 
 sRGB / Oklab 颜色分布图按当前 DRT 的输出范围自动缩放，并适配画布比例，保留高于 SDR 白的 HDR 点。sRGB 图的外框表示完整输出范围，HDR 下另显示内部的 SDR 参考立方体；图上标注范围相对于 SDR 白的倍数。仅支持 SDR 的 DRT 保持 0–1× 范围。
 
@@ -25,12 +25,13 @@ sRGB / Oklab 颜色分布图按当前 DRT 的输出范围自动缩放，并适�
 
 研究目录只保留 `Oklab ACES-inspired` 与 `RGB Reinhard` 两款质量基线。`RGB Reinhard` 通过中性轴 inset/outset 进入和离开虚拟 RGB 工作坐标，逐通道应用曲线，再提供 HSV 色相回拉。默认启动选择 `Oklab ACES-inspired`。
 
-第三方参考放在 [shaders/reference/](shaders/reference/)，两款研究基线放在 [shaders/research/](shaders/research/)，纯显示转换 `None` 位于 [shaders/none_drt.wgsl](shaders/none_drt.wgsl)。参考包括 AgX-S2O3、ACES 1.3、ACES 2、Blender AgX、Filmic、AMD LPM、Hable、Khronos PBR Neutral、Lottes、OpenDRT、Uchimura 和 Narkowicz ACES Filmic Fit；完整预设、不可变源码链接和验证记录见 [参考登记](references/README.md)。上游原始资料下载到项目内 `third_party/reference_sources/`，不进入 Git；运行所需移植 LUT 进入 Git。
+第三方参考放在 [shaders/reference/](shaders/reference/)，两款研究基线放在 [shaders/research/](shaders/research/)，纯显示转换 `None` 位于 [shaders/none_drt.wgsl](shaders/none_drt.wgsl)。参考包括 AgX-S2O3、ACES 1.3、ACES 2、Blender AgX、Filmic、AMD LPM、Hable、Khronos PBR Neutral、Lottes、OpenDRT、Uchimura、GT7 和 Narkowicz ACES Filmic Fit；完整预设、不可变源码链接和验证记录见 [参考登记](references/README.md)。上游原始资料下载到项目内 `third_party/reference_sources/`，不进入 Git；运行所需移植 LUT 进入 Git。
 
 | 名称 | 主要结构 | 着色器 |
 | --- | --- | --- |
 | None | 无色调压缩，执行显示转换与范围裁切 | [none_drt.wgsl](shaders/none_drt.wgsl) |
 | AgX-S2O3 | 保留原始 AgX-S2O3 结构的参考移植 | [agx_s2o3.wgsl](shaders/reference/agx_s2o3.wgsl) |
+| GT7 Tone Mapping | Polyphony 的 GT7 曲线与 ICtCp 颜色体积映射 | [gt7.wgsl](shaders/reference/gt7.wgsl) |
 | Oklab ACES-inspired | Oklab L³ 的线性低段与渐近长肩部，结合固定色相方向的柔性色度边界处理 | [oklab_aces.wgsl](shaders/research/oklab_aces.wgsl) |
 | RGB Reinhard | 逐通道线性段与 Reinhard 肩部，输出线性光后做 sRGB 编码 | [rgb_reinhard.wgsl](shaders/research/rgb_reinhard.wgsl) |
 
@@ -92,7 +93,7 @@ cargo clippy --all-targets -- -D warnings
 
 有可用 GPU 时，运行 `cargo test gpu::validation -- --ignored` 检查着色器执行、SDR/HDR 输出、异常值和热重载恢复。
 
-`cargo +stable test --locked -- --include-ignored` 包含参考的 420 组独立数值对照，以及全部 15 个 DRT 的 225 种左右对比组合。两款质量基线另验证低段线性、SDR/HDR 肩部、颜色趋白轨迹，以及各参数对对比画面的独立更新。参考数据生成和来源复现方法见 [验证说明](references/README.md#来源与复现)。
+`cargo +stable test --locked -- --include-ignored` 包含参考的 642 组独立数值对照，以及全部 16 个 DRT 的 256 种左右对比组合。两款质量基线另验证低段线性、SDR/HDR 肩部、颜色趋白轨迹，以及各参数对对比画面的独立更新。参考数据生成和来源复现方法见 [验证说明](references/README.md#来源与复现)。
 
 外部测试图可放入已忽略的 `test-assets/`，不随项目分发。
 

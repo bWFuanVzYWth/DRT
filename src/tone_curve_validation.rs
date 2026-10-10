@@ -29,14 +29,17 @@ fn tone_curve_linear_y_has_exact_black_and_equal_light_intervals() {
 #[test]
 fn tone_curve_identity_is_exponential_and_stops_at_the_real_peak_crossing() {
     let rect = egui::Rect::from_min_size(egui::pos2(27.0, 41.0), egui::vec2(510.0, 204.0));
+    for (ev, fraction) in [(-12.0, 0.0), (0.0, 0.5), (12.0, 1.0)] {
+        assert!((map_x(rect, ev) - (rect.left() + fraction * rect.width())).abs() < 0.0001);
+    }
     for peak in [1.0_f32, 4.0, 64.0] {
         let points = identity_points(rect, peak);
         assert!(points.len() > 32);
         assert!((points[0].x - rect.left()).abs() < 0.0001);
         let last = points.last().unwrap();
         let peak_ev = (peak / 0.18).log2();
-        let crossing =
-            rect.left() + rect.width() * (peak_ev - INPUT_MIN_EV) / (INPUT_MAX_EV - INPUT_MIN_EV);
+        // The screen calibration stays fixed at ±12 EV for every display peak.
+        let crossing = rect.left() + rect.width() * (peak_ev + 12.0) / 24.0;
         assert!((last.x - crossing).abs() < 0.0001);
         assert!((last.y - rect.top()).abs() < 0.0001);
         assert!(
@@ -63,8 +66,7 @@ fn tone_curve_identity_is_exponential_and_stops_at_the_real_peak_crossing() {
         // if the reference remained a diagonal or the y axis were logarithmic.
         for fraction in [0.25_f32, 0.5, 0.75] {
             let ev = peak_ev + fraction.log2();
-            let x =
-                rect.left() + rect.width() * (ev - INPUT_MIN_EV) / (INPUT_MAX_EV - INPUT_MIN_EV);
+            let x = rect.left() + rect.width() * (ev + 12.0) / 24.0;
             let pair = points
                 .windows(2)
                 .find(|pair| pair[0].x <= x && pair[1].x >= x)

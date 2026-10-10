@@ -705,7 +705,13 @@ fn drt_gpu_hot_reload_recovers() {
         for kind in DrtKind::ALL {
             drt.set_drt(kind);
             drt.set_hdr_headroom(headroom);
-            let expected_range = if kind.supports_hdr() { headroom } else { 1.0 };
+            let expected_range = if kind == DrtKind::Gt7 {
+                headroom.min(40.0)
+            } else if kind.supports_hdr() {
+                headroom
+            } else {
+                1.0
+            };
             assert_eq!(drt.active_output_headroom(), expected_range);
         }
         for kind in DrtKind::RESEARCH {

@@ -1,0 +1,4049 @@
+{
+  "format_version": 1,
+  "records": [
+    {
+      "algorithm": "gt7",
+      "headroom": 1.0,
+      "source_url": "https://blog.selfshadow.com/publications/s2025-shading-course/pdi/supplemental/gt7_tone_mapping.cpp",
+      "source_sha256": "94df7e7e310b9423ebb5aaaa29416f376ebbae66e0948fb259f8688314b29822",
+      "source_version": "1.0 (2025-08-10)",
+      "oracle": "Compiled unmodified official GT7ToneMapping C++ ICtCp implementation",
+      "input_space": "scene-linear AP0 D60 quantized to rgba16float",
+      "output_space": "display-linear Rec.709 D65, GT 250-nit SDR white = 1",
+      "effective_headroom": 1.0,
+      "mode": "initializeAsSDR()",
+      "documented_peak_range": "250..10000 nits; requested headroom 64 is capped at 40 to preserve the official input contract",
+      "defaults": {
+        "alpha": 0.25,
+        "gray_point": 0.538,
+        "linear_section": 0.444,
+        "toe_strength": 1.28,
+        "blend_ratio": 0.6,
+        "chroma_fade_start": 0.98,
+        "chroma_fade_end": 1.16
+      },
+      "vectors": [
+        {
+          "name": "black",
+          "input_rec709": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "expected_linear_rec709": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "name": "near_black",
+          "input_rec709": [
+            0.0001,
+            0.0001,
+            0.0001
+          ],
+          "input_ap0": [
+            0.00010001659393310547,
+            0.00010001659393310547,
+            0.00010001659393310547
+          ],
+          "expected_linear_rec709": [
+            3.60855438e-06,
+            3.61096795e-06,
+            3.61071466e-06
+          ]
+        },
+        {
+          "name": "shadow_gray",
+          "input_rec709": [
+            0.01,
+            0.01,
+            0.01
+          ],
+          "input_ap0": [
+            0.01000213623046875,
+            0.01000213623046875,
+            0.01000213623046875
+          ],
+          "expected_linear_rec709": [
+            0.00131337228,
+            0.00131380185,
+            0.0013137369
+          ]
+        },
+        {
+          "name": "middle_gray",
+          "input_rec709": [
+            0.18,
+            0.18,
+            0.18
+          ],
+          "input_ap0": [
+            0.1800537109375,
+            0.179931640625,
+            0.179931640625
+          ],
+          "expected_linear_rec709": [
+            0.0580331385,
+            0.0579149388,
+            0.0579280779
+          ]
+        },
+        {
+          "name": "curve_midpoint",
+          "input_rec709": [
+            0.538,
+            0.538,
+            0.538
+          ],
+          "input_ap0": [
+            0.5380859375,
+            0.5380859375,
+            0.5380859375
+          ],
+          "expected_linear_rec709": [
+            0.215145767,
+            0.215276152,
+            0.215254948
+          ]
+        },
+        {
+          "name": "reference_white",
+          "input_rec709": [
+            1.0,
+            1.0,
+            1.0
+          ],
+          "input_ap0": [
+            1.0,
+            1.0,
+            1.0
+          ],
+          "expected_linear_rec709": [
+            0.399866611,
+            0.400050461,
+            0.40002057
+          ]
+        },
+        {
+          "name": "sdr_shoulder_join",
+          "input_rec709": [
+            1.11,
+            1.11,
+            1.11
+          ],
+          "input_ap0": [
+            1.1103515625,
+            1.1103515625,
+            1.1103515625
+          ],
+          "expected_linear_rec709": [
+            0.444071591,
+            0.444198251,
+            0.444178522
+          ]
+        },
+        {
+          "name": "sdr_paper_white",
+          "input_rec709": [
+            2.5,
+            2.5,
+            2.5
+          ],
+          "input_ap0": [
+            2.5,
+            2.5,
+            2.5
+          ],
+          "expected_linear_rec709": [
+            0.835137069,
+            0.835162461,
+            0.83522439
+          ]
+        },
+        {
+          "name": "highlight_gray",
+          "input_rec709": [
+            16.0,
+            16.0,
+            16.0
+          ],
+          "input_ap0": [
+            16.0,
+            16.0,
+            16.0
+          ],
+          "expected_linear_rec709": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "name": "very_bright_gray",
+          "input_rec709": [
+            4096.0,
+            4096.0,
+            4096.0
+          ],
+          "input_ap0": [
+            4096.0,
+            4096.0,
+            4096.0
+          ],
+          "expected_linear_rec709": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "name": "red",
+          "input_rec709": [
+            1.0,
+            0.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.439697265625,
+            0.0897216796875,
+            0.01751708984375
+          ],
+          "expected_linear_rec709": [
+            0.381994545,
+            -0.00581772719,
+            -0.0016356851
+          ]
+        },
+        {
+          "name": "green",
+          "input_rec709": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.383056640625,
+            0.8134765625,
+            0.11151123046875
+          ],
+          "expected_linear_rec709": [
+            -0.0034543965,
+            0.397880614,
+            -0.00587420538
+          ]
+        },
+        {
+          "name": "blue",
+          "input_rec709": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "input_ap0": [
+            0.1773681640625,
+            0.0968017578125,
+            0.87109375
+          ],
+          "expected_linear_rec709": [
+            -0.00519364327,
+            -0.00171089824,
+            0.377941251
+          ]
+        },
+        {
+          "name": "cyan",
+          "input_rec709": [
+            0.0,
+            1.0,
+            1.0
+          ],
+          "input_ap0": [
+            0.560546875,
+            0.91015625,
+            0.982421875
+          ],
+          "expected_linear_rec709": [
+            -0.00197331049,
+            0.399338722,
+            0.399268031
+          ]
+        },
+        {
+          "name": "magenta",
+          "input_rec709": [
+            1.0,
+            0.0,
+            1.0
+          ],
+          "input_ap0": [
+            0.6171875,
+            0.1865234375,
+            0.88818359375
+          ],
+          "expected_linear_rec709": [
+            0.38913399,
+            -0.00618713349,
+            0.386669934
+          ]
+        },
+        {
+          "name": "yellow",
+          "input_rec709": [
+            1.0,
+            1.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.82275390625,
+            0.9033203125,
+            0.1290283203125
+          ],
+          "expected_linear_rec709": [
+            0.399589539,
+            0.399350762,
+            -0.00625629723
+          ]
+        },
+        {
+          "name": "bright_red",
+          "input_rec709": [
+            64.0,
+            0.0,
+            0.0
+          ],
+          "input_ap0": [
+            28.140625,
+            5.7421875,
+            1.12109375
+          ],
+          "expected_linear_rec709": [
+            1.01515663,
+            1.00173712,
+            0.767246008
+          ]
+        },
+        {
+          "name": "bright_green",
+          "input_rec709": [
+            0.0,
+            64.0,
+            0.0
+          ],
+          "input_ap0": [
+            24.515625,
+            52.0625,
+            7.13671875
+          ],
+          "expected_linear_rec709": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "name": "bright_blue",
+          "input_rec709": [
+            0.0,
+            0.0,
+            64.0
+          ],
+          "input_ap0": [
+            11.3515625,
+            6.1953125,
+            55.75
+          ],
+          "expected_linear_rec709": [
+            0.80621624,
+            0.407152057,
+            0.835582256
+          ]
+        },
+        {
+          "name": "bright_yellow",
+          "input_rec709": [
+            64.0,
+            64.0,
+            0.0
+          ],
+          "input_ap0": [
+            52.65625,
+            57.8125,
+            8.2578125
+          ],
+          "expected_linear_rec709": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "name": "bright_cyan",
+          "input_rec709": [
+            0.0,
+            64.0,
+            64.0
+          ],
+          "input_ap0": [
+            35.875,
+            58.25,
+            62.875
+          ],
+          "expected_linear_rec709": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "name": "bright_magenta",
+          "input_rec709": [
+            64.0,
+            0.0,
+            64.0
+          ],
+          "input_ap0": [
+            39.5,
+            11.9375,
+            56.84375
+          ],
+          "expected_linear_rec709": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "name": "blue_highlight",
+          "input_rec709": [
+            0.1,
+            0.4,
+            4.0
+          ],
+          "input_ap0": [
+            0.90673828125,
+            0.7216796875,
+            3.529296875
+          ],
+          "expected_linear_rec709": [
+            0.0571051165,
+            0.146580249,
+            1.10112572
+          ]
+        },
+        {
+          "name": "warm_highlight",
+          "input_rec709": [
+            100.0,
+            10.0,
+            1.0
+          ],
+          "input_ap0": [
+            47.96875,
+            17.203125,
+            3.736328125
+          ],
+          "expected_linear_rec709": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "name": "near_white_highlight",
+          "input_rec709": [
+            16.0,
+            14.0,
+            12.0
+          ],
+          "input_ap0": [
+            14.5234375,
+            13.984375,
+            12.2890625
+          ],
+          "expected_linear_rec709": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "name": "signed_rec709",
+          "input_rec709": [
+            -0.1,
+            0.2,
+            0.1
+          ],
+          "input_ap0": [
+            0.050384521484375,
+            0.1634521484375,
+            0.107666015625
+          ],
+          "expected_linear_rec709": [
+            -0.033925388,
+            0.0638914779,
+            0.0290143806
+          ]
+        },
+        {
+          "name": "ap0_red",
+          "input_ap0": [
+            16.0,
+            0.0,
+            0.0
+          ],
+          "expected_linear_rec709": [
+            0.975558281,
+            0.129502162,
+            0.185039297
+          ]
+        },
+        {
+          "name": "ap0_green",
+          "input_ap0": [
+            0.0,
+            16.0,
+            0.0
+          ],
+          "expected_linear_rec709": [
+            0.158614352,
+            0.974341094,
+            0.389531255
+          ]
+        },
+        {
+          "name": "ap0_blue",
+          "input_ap0": [
+            0.0,
+            0.0,
+            16.0
+          ],
+          "expected_linear_rec709": [
+            -0.0728498623,
+            -0.00834942237,
+            1.11872971
+          ]
+        },
+        {
+          "name": "negative_ap0",
+          "input_ap0": [
+            -1.0,
+            -1.0,
+            -1.0
+          ],
+          "expected_linear_rec709": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "name": "official_example_1",
+          "source_input_rec2020": [
+            0.5,
+            1.23,
+            0.75
+          ],
+          "input_ap0": [
+            0.65576171875,
+            1.150390625,
+            0.763671875
+          ],
+          "expected_linear_rec709": [
+            0.021424856,
+            0.528288901,
+            0.282125473
+          ]
+        },
+        {
+          "name": "official_example_2",
+          "source_input_rec2020": [
+            12.3,
+            34.3,
+            56.9
+          ],
+          "input_ap0": [
+            23.046875,
+            35.4375,
+            56.28125
+          ],
+          "expected_linear_rec709": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "name": "official_example_3",
+          "source_input_rec2020": [
+            1504.7,
+            64.51,
+            0.5
+          ],
+          "input_ap0": [
+            1032.0,
+            124.5,
+            1.384765625
+          ],
+          "expected_linear_rec709": [
+            1.01903737,
+            1.00218189,
+            0.707650721
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_0.978",
+          "source_input_rec2020": [
+            0.750083208,
+            3.00033283,
+            1.50016642
+          ],
+          "input_ap0": [
+            1.2275390625,
+            2.75390625,
+            1.54296875
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 0.977999985,
+          "expected_linear_rec709": [
+            -0.159583628,
+            1.03466141,
+            0.483053088
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_0.982",
+          "source_input_rec2020": [
+            0.767518699,
+            3.0700748,
+            1.5350374
+          ],
+          "input_ap0": [
+            1.255859375,
+            2.818359375,
+            1.5791015625
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 0.981999993,
+          "expected_linear_rec709": [
+            -0.159506261,
+            1.04706264,
+            0.491000652
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_1.158",
+          "source_input_rec2020": [
+            2.07011795,
+            8.2804718,
+            4.1402359
+          ],
+          "input_ap0": [
+            3.38671875,
+            7.6015625,
+            4.2578125
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 1.15799999,
+          "expected_linear_rec709": [
+            0.863209844,
+            1.01026034,
+            1.00149536
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_1.162",
+          "source_input_rec2020": [
+            2.11668396,
+            8.46673584,
+            4.23336792
+          ],
+          "input_ap0": [
+            3.462890625,
+            7.7734375,
+            4.35546875
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 1.16199994,
+          "expected_linear_rec709": [
+            0.875425696,
+            1.0093441,
+            1.00136173
+          ]
+        }
+      ]
+    },
+    {
+      "algorithm": "gt7",
+      "headroom": 2.0,
+      "source_url": "https://blog.selfshadow.com/publications/s2025-shading-course/pdi/supplemental/gt7_tone_mapping.cpp",
+      "source_sha256": "94df7e7e310b9423ebb5aaaa29416f376ebbae66e0948fb259f8688314b29822",
+      "source_version": "1.0 (2025-08-10)",
+      "oracle": "Compiled unmodified official GT7ToneMapping C++ ICtCp implementation",
+      "input_space": "scene-linear AP0 D60 quantized to rgba16float",
+      "output_space": "display-linear Rec.709 D65, GT 250-nit SDR white = 1",
+      "effective_headroom": 2.0,
+      "mode": "initializeAsHDR(500 nits), output divided by 2.5",
+      "documented_peak_range": "250..10000 nits; requested headroom 64 is capped at 40 to preserve the official input contract",
+      "defaults": {
+        "alpha": 0.25,
+        "gray_point": 0.538,
+        "linear_section": 0.444,
+        "toe_strength": 1.28,
+        "blend_ratio": 0.6,
+        "chroma_fade_start": 0.98,
+        "chroma_fade_end": 1.16
+      },
+      "vectors": [
+        {
+          "name": "black",
+          "input_rec709": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "expected_linear_rec709": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "name": "near_black",
+          "input_rec709": [
+            0.0001,
+            0.0001,
+            0.0001
+          ],
+          "input_ap0": [
+            0.00010001659393310547,
+            0.00010001659393310547,
+            0.00010001659393310547
+          ],
+          "expected_linear_rec709": [
+            3.60855438e-06,
+            3.61096795e-06,
+            3.61071466e-06
+          ]
+        },
+        {
+          "name": "shadow_gray",
+          "input_rec709": [
+            0.01,
+            0.01,
+            0.01
+          ],
+          "input_ap0": [
+            0.01000213623046875,
+            0.01000213623046875,
+            0.01000213623046875
+          ],
+          "expected_linear_rec709": [
+            0.00131337228,
+            0.00131380185,
+            0.0013137369
+          ]
+        },
+        {
+          "name": "middle_gray",
+          "input_rec709": [
+            0.18,
+            0.18,
+            0.18
+          ],
+          "input_ap0": [
+            0.1800537109375,
+            0.179931640625,
+            0.179931640625
+          ],
+          "expected_linear_rec709": [
+            0.0580331385,
+            0.0579149388,
+            0.0579280779
+          ]
+        },
+        {
+          "name": "curve_midpoint",
+          "input_rec709": [
+            0.538,
+            0.538,
+            0.538
+          ],
+          "input_ap0": [
+            0.5380859375,
+            0.5380859375,
+            0.5380859375
+          ],
+          "expected_linear_rec709": [
+            0.215145767,
+            0.215276152,
+            0.215254948
+          ]
+        },
+        {
+          "name": "reference_white",
+          "input_rec709": [
+            1.0,
+            1.0,
+            1.0
+          ],
+          "input_ap0": [
+            1.0,
+            1.0,
+            1.0
+          ],
+          "expected_linear_rec709": [
+            0.399866611,
+            0.400050461,
+            0.40002057
+          ]
+        },
+        {
+          "name": "sdr_shoulder_join",
+          "input_rec709": [
+            1.11,
+            1.11,
+            1.11
+          ],
+          "input_ap0": [
+            1.1103515625,
+            1.1103515625,
+            1.1103515625
+          ],
+          "expected_linear_rec709": [
+            0.444071591,
+            0.444198251,
+            0.444178522
+          ]
+        },
+        {
+          "name": "sdr_paper_white",
+          "input_rec709": [
+            2.5,
+            2.5,
+            2.5
+          ],
+          "input_ap0": [
+            2.5,
+            2.5,
+            2.5
+          ],
+          "expected_linear_rec709": [
+            0.995862603,
+            0.995929301,
+            0.99600184
+          ]
+        },
+        {
+          "name": "highlight_gray",
+          "input_rec709": [
+            16.0,
+            16.0,
+            16.0
+          ],
+          "input_ap0": [
+            16.0,
+            16.0,
+            16.0
+          ],
+          "expected_linear_rec709": [
+            2.0,
+            2.0,
+            2.0
+          ]
+        },
+        {
+          "name": "very_bright_gray",
+          "input_rec709": [
+            4096.0,
+            4096.0,
+            4096.0
+          ],
+          "input_ap0": [
+            4096.0,
+            4096.0,
+            4096.0
+          ],
+          "expected_linear_rec709": [
+            2.0,
+            2.0,
+            2.0
+          ]
+        },
+        {
+          "name": "red",
+          "input_rec709": [
+            1.0,
+            0.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.439697265625,
+            0.0897216796875,
+            0.01751708984375
+          ],
+          "expected_linear_rec709": [
+            0.381994545,
+            -0.00581772719,
+            -0.0016356851
+          ]
+        },
+        {
+          "name": "green",
+          "input_rec709": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.383056640625,
+            0.8134765625,
+            0.11151123046875
+          ],
+          "expected_linear_rec709": [
+            -0.0034543965,
+            0.397880614,
+            -0.00587420538
+          ]
+        },
+        {
+          "name": "blue",
+          "input_rec709": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "input_ap0": [
+            0.1773681640625,
+            0.0968017578125,
+            0.87109375
+          ],
+          "expected_linear_rec709": [
+            -0.00519364327,
+            -0.00171089824,
+            0.377941251
+          ]
+        },
+        {
+          "name": "cyan",
+          "input_rec709": [
+            0.0,
+            1.0,
+            1.0
+          ],
+          "input_ap0": [
+            0.560546875,
+            0.91015625,
+            0.982421875
+          ],
+          "expected_linear_rec709": [
+            -0.00197331049,
+            0.399338722,
+            0.399268031
+          ]
+        },
+        {
+          "name": "magenta",
+          "input_rec709": [
+            1.0,
+            0.0,
+            1.0
+          ],
+          "input_ap0": [
+            0.6171875,
+            0.1865234375,
+            0.88818359375
+          ],
+          "expected_linear_rec709": [
+            0.38913399,
+            -0.00618713349,
+            0.386669934
+          ]
+        },
+        {
+          "name": "yellow",
+          "input_rec709": [
+            1.0,
+            1.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.82275390625,
+            0.9033203125,
+            0.1290283203125
+          ],
+          "expected_linear_rec709": [
+            0.399589539,
+            0.399350762,
+            -0.00625629723
+          ]
+        },
+        {
+          "name": "bright_red",
+          "input_rec709": [
+            64.0,
+            0.0,
+            0.0
+          ],
+          "input_ap0": [
+            28.140625,
+            5.7421875,
+            1.12109375
+          ],
+          "expected_linear_rec709": [
+            2.20809364,
+            1.59469211,
+            1.11886072
+          ]
+        },
+        {
+          "name": "bright_green",
+          "input_rec709": [
+            0.0,
+            64.0,
+            0.0
+          ],
+          "input_ap0": [
+            24.515625,
+            52.0625,
+            7.13671875
+          ],
+          "expected_linear_rec709": [
+            2.0,
+            2.0,
+            2.0
+          ]
+        },
+        {
+          "name": "bright_blue",
+          "input_rec709": [
+            0.0,
+            0.0,
+            64.0
+          ],
+          "input_ap0": [
+            11.3515625,
+            6.1953125,
+            55.75
+          ],
+          "expected_linear_rec709": [
+            0.669735551,
+            0.320510149,
+            2.18939638
+          ]
+        },
+        {
+          "name": "bright_yellow",
+          "input_rec709": [
+            64.0,
+            64.0,
+            0.0
+          ],
+          "input_ap0": [
+            52.65625,
+            57.8125,
+            8.2578125
+          ],
+          "expected_linear_rec709": [
+            2.0,
+            2.0,
+            2.0
+          ]
+        },
+        {
+          "name": "bright_cyan",
+          "input_rec709": [
+            0.0,
+            64.0,
+            64.0
+          ],
+          "input_ap0": [
+            35.875,
+            58.25,
+            62.875
+          ],
+          "expected_linear_rec709": [
+            2.0,
+            2.0,
+            2.0
+          ]
+        },
+        {
+          "name": "bright_magenta",
+          "input_rec709": [
+            64.0,
+            0.0,
+            64.0
+          ],
+          "input_ap0": [
+            39.5,
+            11.9375,
+            56.84375
+          ],
+          "expected_linear_rec709": [
+            2.08797002,
+            1.83040428,
+            2.01505685
+          ]
+        },
+        {
+          "name": "blue_highlight",
+          "input_rec709": [
+            0.1,
+            0.4,
+            4.0
+          ],
+          "input_ap0": [
+            0.90673828125,
+            0.7216796875,
+            3.529296875
+          ],
+          "expected_linear_rec709": [
+            0.0395888239,
+            0.156125247,
+            1.5259757
+          ]
+        },
+        {
+          "name": "warm_highlight",
+          "input_rec709": [
+            100.0,
+            10.0,
+            1.0
+          ],
+          "input_ap0": [
+            47.96875,
+            17.203125,
+            3.736328125
+          ],
+          "expected_linear_rec709": [
+            2.00941038,
+            2.00107861,
+            1.85548723
+          ]
+        },
+        {
+          "name": "near_white_highlight",
+          "input_rec709": [
+            16.0,
+            14.0,
+            12.0
+          ],
+          "input_ap0": [
+            14.5234375,
+            13.984375,
+            12.2890625
+          ],
+          "expected_linear_rec709": [
+            2.0,
+            2.0,
+            2.0
+          ]
+        },
+        {
+          "name": "signed_rec709",
+          "input_rec709": [
+            -0.1,
+            0.2,
+            0.1
+          ],
+          "input_ap0": [
+            0.050384521484375,
+            0.1634521484375,
+            0.107666015625
+          ],
+          "expected_linear_rec709": [
+            -0.033925388,
+            0.0638914779,
+            0.0290143806
+          ]
+        },
+        {
+          "name": "ap0_red",
+          "input_ap0": [
+            16.0,
+            0.0,
+            0.0
+          ],
+          "expected_linear_rec709": [
+            3.2732656,
+            -0.161140606,
+            -0.0138214212
+          ]
+        },
+        {
+          "name": "ap0_green",
+          "input_ap0": [
+            0.0,
+            16.0,
+            0.0
+          ],
+          "expected_linear_rec709": [
+            0.219260275,
+            1.98375368,
+            0.659368694
+          ]
+        },
+        {
+          "name": "ap0_blue",
+          "input_ap0": [
+            0.0,
+            0.0,
+            16.0
+          ],
+          "expected_linear_rec709": [
+            -0.145699725,
+            -0.0166988447,
+            2.23745942
+          ]
+        },
+        {
+          "name": "negative_ap0",
+          "input_ap0": [
+            -1.0,
+            -1.0,
+            -1.0
+          ],
+          "expected_linear_rec709": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "name": "official_example_1",
+          "source_input_rec2020": [
+            0.5,
+            1.23,
+            0.75
+          ],
+          "input_ap0": [
+            0.65576171875,
+            1.150390625,
+            0.763671875
+          ],
+          "expected_linear_rec709": [
+            0.0211459789,
+            0.529720545,
+            0.282496214
+          ]
+        },
+        {
+          "name": "official_example_2",
+          "source_input_rec2020": [
+            12.3,
+            34.3,
+            56.9
+          ],
+          "input_ap0": [
+            23.046875,
+            35.4375,
+            56.28125
+          ],
+          "expected_linear_rec709": [
+            2.0,
+            2.0,
+            2.0
+          ]
+        },
+        {
+          "name": "official_example_3",
+          "source_input_rec2020": [
+            1504.7,
+            64.51,
+            0.5
+          ],
+          "input_ap0": [
+            1032.0,
+            124.5,
+            1.384765625
+          ],
+          "expected_linear_rec709": [
+            2.0446744,
+            2.00512028,
+            1.31395221
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_0.978",
+          "source_input_rec2020": [
+            1.48213661,
+            5.92854643,
+            2.96427321
+          ],
+          "input_ap0": [
+            2.42578125,
+            5.44140625,
+            3.048828125
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 0.977999985,
+          "expected_linear_rec709": [
+            -0.314771116,
+            2.05449462,
+            0.958951533
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_0.982",
+          "source_input_rec2020": [
+            1.5199157,
+            6.0796628,
+            3.0398314
+          ],
+          "input_ap0": [
+            2.486328125,
+            5.58203125,
+            3.126953125
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 0.981999993,
+          "expected_linear_rec709": [
+            -0.315188348,
+            2.08190608,
+            0.976326883
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_1.158",
+          "source_input_rec2020": [
+            4.55047846,
+            18.2019138,
+            9.10095692
+          ],
+          "input_ap0": [
+            7.4453125,
+            16.703125,
+            9.359375
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 1.15799999,
+          "expected_linear_rec709": [
+            1.8273747,
+            2.01294827,
+            2.00188708
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_1.162",
+          "source_input_rec2020": [
+            4.66473579,
+            18.6589432,
+            9.32947159
+          ],
+          "input_ap0": [
+            7.6328125,
+            17.125,
+            9.59375
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 1.16199994,
+          "expected_linear_rec709": [
+            1.85366321,
+            2.01097631,
+            2.00159979
+          ]
+        }
+      ]
+    },
+    {
+      "algorithm": "gt7",
+      "headroom": 4.0,
+      "source_url": "https://blog.selfshadow.com/publications/s2025-shading-course/pdi/supplemental/gt7_tone_mapping.cpp",
+      "source_sha256": "94df7e7e310b9423ebb5aaaa29416f376ebbae66e0948fb259f8688314b29822",
+      "source_version": "1.0 (2025-08-10)",
+      "oracle": "Compiled unmodified official GT7ToneMapping C++ ICtCp implementation",
+      "input_space": "scene-linear AP0 D60 quantized to rgba16float",
+      "output_space": "display-linear Rec.709 D65, GT 250-nit SDR white = 1",
+      "effective_headroom": 4.0,
+      "mode": "initializeAsHDR(1000 nits), output divided by 2.5",
+      "documented_peak_range": "250..10000 nits; requested headroom 64 is capped at 40 to preserve the official input contract",
+      "defaults": {
+        "alpha": 0.25,
+        "gray_point": 0.538,
+        "linear_section": 0.444,
+        "toe_strength": 1.28,
+        "blend_ratio": 0.6,
+        "chroma_fade_start": 0.98,
+        "chroma_fade_end": 1.16
+      },
+      "vectors": [
+        {
+          "name": "black",
+          "input_rec709": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "expected_linear_rec709": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "name": "near_black",
+          "input_rec709": [
+            0.0001,
+            0.0001,
+            0.0001
+          ],
+          "input_ap0": [
+            0.00010001659393310547,
+            0.00010001659393310547,
+            0.00010001659393310547
+          ],
+          "expected_linear_rec709": [
+            3.60855438e-06,
+            3.61096795e-06,
+            3.61071466e-06
+          ]
+        },
+        {
+          "name": "shadow_gray",
+          "input_rec709": [
+            0.01,
+            0.01,
+            0.01
+          ],
+          "input_ap0": [
+            0.01000213623046875,
+            0.01000213623046875,
+            0.01000213623046875
+          ],
+          "expected_linear_rec709": [
+            0.00131337228,
+            0.00131380185,
+            0.0013137369
+          ]
+        },
+        {
+          "name": "middle_gray",
+          "input_rec709": [
+            0.18,
+            0.18,
+            0.18
+          ],
+          "input_ap0": [
+            0.1800537109375,
+            0.179931640625,
+            0.179931640625
+          ],
+          "expected_linear_rec709": [
+            0.0580331385,
+            0.0579149388,
+            0.0579280779
+          ]
+        },
+        {
+          "name": "curve_midpoint",
+          "input_rec709": [
+            0.538,
+            0.538,
+            0.538
+          ],
+          "input_ap0": [
+            0.5380859375,
+            0.5380859375,
+            0.5380859375
+          ],
+          "expected_linear_rec709": [
+            0.215145767,
+            0.215276152,
+            0.215254948
+          ]
+        },
+        {
+          "name": "reference_white",
+          "input_rec709": [
+            1.0,
+            1.0,
+            1.0
+          ],
+          "input_ap0": [
+            1.0,
+            1.0,
+            1.0
+          ],
+          "expected_linear_rec709": [
+            0.399866611,
+            0.400050461,
+            0.40002057
+          ]
+        },
+        {
+          "name": "sdr_shoulder_join",
+          "input_rec709": [
+            1.11,
+            1.11,
+            1.11
+          ],
+          "input_ap0": [
+            1.1103515625,
+            1.1103515625,
+            1.1103515625
+          ],
+          "expected_linear_rec709": [
+            0.444071591,
+            0.444198251,
+            0.444178522
+          ]
+        },
+        {
+          "name": "sdr_paper_white",
+          "input_rec709": [
+            2.5,
+            2.5,
+            2.5
+          ],
+          "input_ap0": [
+            2.5,
+            2.5,
+            2.5
+          ],
+          "expected_linear_rec709": [
+            0.999968469,
+            1.00005245,
+            1.00008607
+          ]
+        },
+        {
+          "name": "highlight_gray",
+          "input_rec709": [
+            16.0,
+            16.0,
+            16.0
+          ],
+          "input_ap0": [
+            16.0,
+            16.0,
+            16.0
+          ],
+          "expected_linear_rec709": [
+            4.0,
+            4.0,
+            4.0
+          ]
+        },
+        {
+          "name": "very_bright_gray",
+          "input_rec709": [
+            4096.0,
+            4096.0,
+            4096.0
+          ],
+          "input_ap0": [
+            4096.0,
+            4096.0,
+            4096.0
+          ],
+          "expected_linear_rec709": [
+            4.0,
+            4.0,
+            4.0
+          ]
+        },
+        {
+          "name": "red",
+          "input_rec709": [
+            1.0,
+            0.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.439697265625,
+            0.0897216796875,
+            0.01751708984375
+          ],
+          "expected_linear_rec709": [
+            0.381994545,
+            -0.00581772719,
+            -0.0016356851
+          ]
+        },
+        {
+          "name": "green",
+          "input_rec709": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.383056640625,
+            0.8134765625,
+            0.11151123046875
+          ],
+          "expected_linear_rec709": [
+            -0.0034543965,
+            0.397880614,
+            -0.00587420538
+          ]
+        },
+        {
+          "name": "blue",
+          "input_rec709": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "input_ap0": [
+            0.1773681640625,
+            0.0968017578125,
+            0.87109375
+          ],
+          "expected_linear_rec709": [
+            -0.00519364327,
+            -0.00171089824,
+            0.377941251
+          ]
+        },
+        {
+          "name": "cyan",
+          "input_rec709": [
+            0.0,
+            1.0,
+            1.0
+          ],
+          "input_ap0": [
+            0.560546875,
+            0.91015625,
+            0.982421875
+          ],
+          "expected_linear_rec709": [
+            -0.00197331049,
+            0.399338722,
+            0.399268031
+          ]
+        },
+        {
+          "name": "magenta",
+          "input_rec709": [
+            1.0,
+            0.0,
+            1.0
+          ],
+          "input_ap0": [
+            0.6171875,
+            0.1865234375,
+            0.88818359375
+          ],
+          "expected_linear_rec709": [
+            0.38913399,
+            -0.00618713349,
+            0.386669934
+          ]
+        },
+        {
+          "name": "yellow",
+          "input_rec709": [
+            1.0,
+            1.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.82275390625,
+            0.9033203125,
+            0.1290283203125
+          ],
+          "expected_linear_rec709": [
+            0.399589539,
+            0.399350762,
+            -0.00625629723
+          ]
+        },
+        {
+          "name": "bright_red",
+          "input_rec709": [
+            64.0,
+            0.0,
+            0.0
+          ],
+          "input_ap0": [
+            28.140625,
+            5.7421875,
+            1.12109375
+          ],
+          "expected_linear_rec709": [
+            5.716712,
+            1.21555173,
+            0.301341206
+          ]
+        },
+        {
+          "name": "bright_green",
+          "input_rec709": [
+            0.0,
+            64.0,
+            0.0
+          ],
+          "input_ap0": [
+            24.515625,
+            52.0625,
+            7.13671875
+          ],
+          "expected_linear_rec709": [
+            4.03336763,
+            4.00382423,
+            3.48758483
+          ]
+        },
+        {
+          "name": "bright_blue",
+          "input_rec709": [
+            0.0,
+            0.0,
+            64.0
+          ],
+          "input_ap0": [
+            11.3515625,
+            6.1953125,
+            55.75
+          ],
+          "expected_linear_rec709": [
+            0.721313357,
+            0.0866706669,
+            4.44458437
+          ]
+        },
+        {
+          "name": "bright_yellow",
+          "input_rec709": [
+            64.0,
+            64.0,
+            0.0
+          ],
+          "input_ap0": [
+            52.65625,
+            57.8125,
+            8.2578125
+          ],
+          "expected_linear_rec709": [
+            4.01839828,
+            4.00210857,
+            3.71746707
+          ]
+        },
+        {
+          "name": "bright_cyan",
+          "input_rec709": [
+            0.0,
+            64.0,
+            64.0
+          ],
+          "input_ap0": [
+            35.875,
+            58.25,
+            62.875
+          ],
+          "expected_linear_rec709": [
+            4.0,
+            4.0,
+            4.0
+          ]
+        },
+        {
+          "name": "bright_magenta",
+          "input_rec709": [
+            64.0,
+            0.0,
+            64.0
+          ],
+          "input_ap0": [
+            39.5,
+            11.9375,
+            56.84375
+          ],
+          "expected_linear_rec709": [
+            4.95422935,
+            2.1603632,
+            4.1633234
+          ]
+        },
+        {
+          "name": "blue_highlight",
+          "input_rec709": [
+            0.1,
+            0.4,
+            4.0
+          ],
+          "input_ap0": [
+            0.90673828125,
+            0.7216796875,
+            3.529296875
+          ],
+          "expected_linear_rec709": [
+            0.0378174484,
+            0.158924937,
+            1.59364402
+          ]
+        },
+        {
+          "name": "warm_highlight",
+          "input_rec709": [
+            100.0,
+            10.0,
+            1.0
+          ],
+          "input_ap0": [
+            47.96875,
+            17.203125,
+            3.736328125
+          ],
+          "expected_linear_rec709": [
+            4.07562447,
+            4.00866747,
+            2.83866024
+          ]
+        },
+        {
+          "name": "near_white_highlight",
+          "input_rec709": [
+            16.0,
+            14.0,
+            12.0
+          ],
+          "input_ap0": [
+            14.5234375,
+            13.984375,
+            12.2890625
+          ],
+          "expected_linear_rec709": [
+            4.06850147,
+            3.92342854,
+            3.58985972
+          ]
+        },
+        {
+          "name": "signed_rec709",
+          "input_rec709": [
+            -0.1,
+            0.2,
+            0.1
+          ],
+          "input_ap0": [
+            0.050384521484375,
+            0.1634521484375,
+            0.107666015625
+          ],
+          "expected_linear_rec709": [
+            -0.033925388,
+            0.0638914779,
+            0.0290143806
+          ]
+        },
+        {
+          "name": "ap0_red",
+          "input_ap0": [
+            16.0,
+            0.0,
+            0.0
+          ],
+          "expected_linear_rec709": [
+            6.64163494,
+            -0.498239607,
+            -0.0675507486
+          ]
+        },
+        {
+          "name": "ap0_green",
+          "input_ap0": [
+            0.0,
+            16.0,
+            0.0
+          ],
+          "expected_linear_rec709": [
+            -2.0231812,
+            4.50609159,
+            -0.32891655
+          ]
+        },
+        {
+          "name": "ap0_blue",
+          "input_ap0": [
+            0.0,
+            0.0,
+            16.0
+          ],
+          "expected_linear_rec709": [
+            -0.291399449,
+            -0.0333976895,
+            4.47491884
+          ]
+        },
+        {
+          "name": "negative_ap0",
+          "input_ap0": [
+            -1.0,
+            -1.0,
+            -1.0
+          ],
+          "expected_linear_rec709": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "name": "official_example_1",
+          "source_input_rec2020": [
+            0.5,
+            1.23,
+            0.75
+          ],
+          "input_ap0": [
+            0.65576171875,
+            1.150390625,
+            0.763671875
+          ],
+          "expected_linear_rec709": [
+            0.0211459789,
+            0.529720545,
+            0.282496214
+          ]
+        },
+        {
+          "name": "official_example_2",
+          "source_input_rec2020": [
+            12.3,
+            34.3,
+            56.9
+          ],
+          "input_ap0": [
+            23.046875,
+            35.4375,
+            56.28125
+          ],
+          "expected_linear_rec709": [
+            4.0,
+            4.0,
+            4.0
+          ]
+        },
+        {
+          "name": "official_example_3",
+          "source_input_rec2020": [
+            1504.7,
+            64.51,
+            0.5
+          ],
+          "input_ap0": [
+            1032.0,
+            124.5,
+            1.384765625
+          ],
+          "expected_linear_rec709": [
+            4.09597063,
+            4.0109992,
+            2.52621412
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_0.978",
+          "source_input_rec2020": [
+            2.9245615,
+            11.698246,
+            5.849123
+          ],
+          "input_ap0": [
+            4.78515625,
+            10.7421875,
+            6.015625
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 0.977999985,
+          "expected_linear_rec709": [
+            -0.624283075,
+            4.07786322,
+            1.90071988
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_0.982",
+          "source_input_rec2020": [
+            3.00643015,
+            12.0257206,
+            6.0128603
+          ],
+          "input_ap0": [
+            4.91796875,
+            11.0390625,
+            6.18359375
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 0.981999993,
+          "expected_linear_rec709": [
+            -0.622238696,
+            4.13656998,
+            1.93919778
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_1.158",
+          "source_input_rec2020": [
+            10.1315422,
+            40.5261688,
+            20.2630844
+          ],
+          "input_ap0": [
+            16.578125,
+            37.21875,
+            20.84375
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 1.15799999,
+          "expected_linear_rec709": [
+            3.87060118,
+            4.00970602,
+            4.00141478
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_1.162",
+          "source_input_rec2020": [
+            10.4169741,
+            41.6678963,
+            20.8339481
+          ],
+          "input_ap0": [
+            17.046875,
+            38.25,
+            21.4375
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 1.16199994,
+          "expected_linear_rec709": [
+            3.92646027,
+            4.00551605,
+            4.00080395
+          ]
+        }
+      ]
+    },
+    {
+      "algorithm": "gt7",
+      "headroom": 16.0,
+      "source_url": "https://blog.selfshadow.com/publications/s2025-shading-course/pdi/supplemental/gt7_tone_mapping.cpp",
+      "source_sha256": "94df7e7e310b9423ebb5aaaa29416f376ebbae66e0948fb259f8688314b29822",
+      "source_version": "1.0 (2025-08-10)",
+      "oracle": "Compiled unmodified official GT7ToneMapping C++ ICtCp implementation",
+      "input_space": "scene-linear AP0 D60 quantized to rgba16float",
+      "output_space": "display-linear Rec.709 D65, GT 250-nit SDR white = 1",
+      "effective_headroom": 16.0,
+      "mode": "initializeAsHDR(4000 nits), output divided by 2.5",
+      "documented_peak_range": "250..10000 nits; requested headroom 64 is capped at 40 to preserve the official input contract",
+      "defaults": {
+        "alpha": 0.25,
+        "gray_point": 0.538,
+        "linear_section": 0.444,
+        "toe_strength": 1.28,
+        "blend_ratio": 0.6,
+        "chroma_fade_start": 0.98,
+        "chroma_fade_end": 1.16
+      },
+      "vectors": [
+        {
+          "name": "black",
+          "input_rec709": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "expected_linear_rec709": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "name": "near_black",
+          "input_rec709": [
+            0.0001,
+            0.0001,
+            0.0001
+          ],
+          "input_ap0": [
+            0.00010001659393310547,
+            0.00010001659393310547,
+            0.00010001659393310547
+          ],
+          "expected_linear_rec709": [
+            3.60855438e-06,
+            3.61096795e-06,
+            3.61071466e-06
+          ]
+        },
+        {
+          "name": "shadow_gray",
+          "input_rec709": [
+            0.01,
+            0.01,
+            0.01
+          ],
+          "input_ap0": [
+            0.01000213623046875,
+            0.01000213623046875,
+            0.01000213623046875
+          ],
+          "expected_linear_rec709": [
+            0.00131337228,
+            0.00131380185,
+            0.0013137369
+          ]
+        },
+        {
+          "name": "middle_gray",
+          "input_rec709": [
+            0.18,
+            0.18,
+            0.18
+          ],
+          "input_ap0": [
+            0.1800537109375,
+            0.179931640625,
+            0.179931640625
+          ],
+          "expected_linear_rec709": [
+            0.0580331385,
+            0.0579149388,
+            0.0579280779
+          ]
+        },
+        {
+          "name": "curve_midpoint",
+          "input_rec709": [
+            0.538,
+            0.538,
+            0.538
+          ],
+          "input_ap0": [
+            0.5380859375,
+            0.5380859375,
+            0.5380859375
+          ],
+          "expected_linear_rec709": [
+            0.215145767,
+            0.215276152,
+            0.215254948
+          ]
+        },
+        {
+          "name": "reference_white",
+          "input_rec709": [
+            1.0,
+            1.0,
+            1.0
+          ],
+          "input_ap0": [
+            1.0,
+            1.0,
+            1.0
+          ],
+          "expected_linear_rec709": [
+            0.399866611,
+            0.400050461,
+            0.40002057
+          ]
+        },
+        {
+          "name": "sdr_shoulder_join",
+          "input_rec709": [
+            1.11,
+            1.11,
+            1.11
+          ],
+          "input_ap0": [
+            1.1103515625,
+            1.1103515625,
+            1.1103515625
+          ],
+          "expected_linear_rec709": [
+            0.444071591,
+            0.444198251,
+            0.444178522
+          ]
+        },
+        {
+          "name": "sdr_paper_white",
+          "input_rec709": [
+            2.5,
+            2.5,
+            2.5
+          ],
+          "input_ap0": [
+            2.5,
+            2.5,
+            2.5
+          ],
+          "expected_linear_rec709": [
+            0.999968469,
+            1.00005245,
+            1.00008607
+          ]
+        },
+        {
+          "name": "highlight_gray",
+          "input_rec709": [
+            16.0,
+            16.0,
+            16.0
+          ],
+          "input_ap0": [
+            16.0,
+            16.0,
+            16.0
+          ],
+          "expected_linear_rec709": [
+            6.40006542,
+            6.40067625,
+            6.40060568
+          ]
+        },
+        {
+          "name": "very_bright_gray",
+          "input_rec709": [
+            4096.0,
+            4096.0,
+            4096.0
+          ],
+          "input_ap0": [
+            4096.0,
+            4096.0,
+            4096.0
+          ],
+          "expected_linear_rec709": [
+            16.0,
+            16.0,
+            16.0
+          ]
+        },
+        {
+          "name": "red",
+          "input_rec709": [
+            1.0,
+            0.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.439697265625,
+            0.0897216796875,
+            0.01751708984375
+          ],
+          "expected_linear_rec709": [
+            0.381994545,
+            -0.00581772719,
+            -0.0016356851
+          ]
+        },
+        {
+          "name": "green",
+          "input_rec709": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.383056640625,
+            0.8134765625,
+            0.11151123046875
+          ],
+          "expected_linear_rec709": [
+            -0.0034543965,
+            0.397880614,
+            -0.00587420538
+          ]
+        },
+        {
+          "name": "blue",
+          "input_rec709": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "input_ap0": [
+            0.1773681640625,
+            0.0968017578125,
+            0.87109375
+          ],
+          "expected_linear_rec709": [
+            -0.00519364327,
+            -0.00171089824,
+            0.377941251
+          ]
+        },
+        {
+          "name": "cyan",
+          "input_rec709": [
+            0.0,
+            1.0,
+            1.0
+          ],
+          "input_ap0": [
+            0.560546875,
+            0.91015625,
+            0.982421875
+          ],
+          "expected_linear_rec709": [
+            -0.00197331049,
+            0.399338722,
+            0.399268031
+          ]
+        },
+        {
+          "name": "magenta",
+          "input_rec709": [
+            1.0,
+            0.0,
+            1.0
+          ],
+          "input_ap0": [
+            0.6171875,
+            0.1865234375,
+            0.88818359375
+          ],
+          "expected_linear_rec709": [
+            0.38913399,
+            -0.00618713349,
+            0.386669934
+          ]
+        },
+        {
+          "name": "yellow",
+          "input_rec709": [
+            1.0,
+            1.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.82275390625,
+            0.9033203125,
+            0.1290283203125
+          ],
+          "expected_linear_rec709": [
+            0.399589539,
+            0.399350762,
+            -0.00625629723
+          ]
+        },
+        {
+          "name": "bright_red",
+          "input_rec709": [
+            64.0,
+            0.0,
+            0.0
+          ],
+          "input_ap0": [
+            28.140625,
+            5.7421875,
+            1.12109375
+          ],
+          "expected_linear_rec709": [
+            21.8578968,
+            0.132979572,
+            0.0162074566
+          ]
+        },
+        {
+          "name": "bright_green",
+          "input_rec709": [
+            0.0,
+            64.0,
+            0.0
+          ],
+          "input_ap0": [
+            24.515625,
+            52.0625,
+            7.13671875
+          ],
+          "expected_linear_rec709": [
+            2.56912994,
+            17.1993847,
+            0.611738801
+          ]
+        },
+        {
+          "name": "bright_blue",
+          "input_rec709": [
+            0.0,
+            0.0,
+            64.0
+          ],
+          "input_ap0": [
+            11.3515625,
+            6.1953125,
+            55.75
+          ],
+          "expected_linear_rec709": [
+            0.239479661,
+            0.0385069698,
+            17.8570461
+          ]
+        },
+        {
+          "name": "bright_yellow",
+          "input_rec709": [
+            64.0,
+            64.0,
+            0.0
+          ],
+          "input_ap0": [
+            52.65625,
+            57.8125,
+            8.2578125
+          ],
+          "expected_linear_rec709": [
+            16.7463741,
+            16.1189232,
+            1.83679032
+          ]
+        },
+        {
+          "name": "bright_cyan",
+          "input_rec709": [
+            0.0,
+            64.0,
+            64.0
+          ],
+          "input_ap0": [
+            35.875,
+            58.25,
+            62.875
+          ],
+          "expected_linear_rec709": [
+            3.58633614,
+            16.9311256,
+            16.1356945
+          ]
+        },
+        {
+          "name": "bright_magenta",
+          "input_rec709": [
+            64.0,
+            0.0,
+            64.0
+          ],
+          "input_ap0": [
+            39.5,
+            11.9375,
+            56.84375
+          ],
+          "expected_linear_rec709": [
+            20.7715359,
+            0.214473784,
+            17.4639702
+          ]
+        },
+        {
+          "name": "blue_highlight",
+          "input_rec709": [
+            0.1,
+            0.4,
+            4.0
+          ],
+          "input_ap0": [
+            0.90673828125,
+            0.7216796875,
+            3.529296875
+          ],
+          "expected_linear_rec709": [
+            0.0378174484,
+            0.158924937,
+            1.59364402
+          ]
+        },
+        {
+          "name": "warm_highlight",
+          "input_rec709": [
+            100.0,
+            10.0,
+            1.0
+          ],
+          "input_ap0": [
+            47.96875,
+            17.203125,
+            3.736328125
+          ],
+          "expected_linear_rec709": [
+            23.2109852,
+            4.30408525,
+            0.463487983
+          ]
+        },
+        {
+          "name": "near_white_highlight",
+          "input_rec709": [
+            16.0,
+            14.0,
+            12.0
+          ],
+          "input_ap0": [
+            14.5234375,
+            13.984375,
+            12.2890625
+          ],
+          "expected_linear_rec709": [
+            6.39760637,
+            5.60057497,
+            4.79874516
+          ]
+        },
+        {
+          "name": "signed_rec709",
+          "input_rec709": [
+            -0.1,
+            0.2,
+            0.1
+          ],
+          "input_ap0": [
+            0.050384521484375,
+            0.1634521484375,
+            0.107666015625
+          ],
+          "expected_linear_rec709": [
+            -0.033925388,
+            0.0638914779,
+            0.0290143806
+          ]
+        },
+        {
+          "name": "ap0_red",
+          "input_ap0": [
+            16.0,
+            0.0,
+            0.0
+          ],
+          "expected_linear_rec709": [
+            15.4494047,
+            -1.15905881,
+            -0.150548562
+          ]
+        },
+        {
+          "name": "ap0_green",
+          "input_ap0": [
+            0.0,
+            16.0,
+            0.0
+          ],
+          "expected_linear_rec709": [
+            -4.44071817,
+            8.56115913,
+            -0.760060072
+          ]
+        },
+        {
+          "name": "ap0_blue",
+          "input_ap0": [
+            0.0,
+            0.0,
+            16.0
+          ],
+          "expected_linear_rec709": [
+            -0.48080501,
+            -0.0551385656,
+            7.3862114
+          ]
+        },
+        {
+          "name": "negative_ap0",
+          "input_ap0": [
+            -1.0,
+            -1.0,
+            -1.0
+          ],
+          "expected_linear_rec709": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "name": "official_example_1",
+          "source_input_rec2020": [
+            0.5,
+            1.23,
+            0.75
+          ],
+          "input_ap0": [
+            0.65576171875,
+            1.150390625,
+            0.763671875
+          ],
+          "expected_linear_rec709": [
+            0.0211459789,
+            0.529720545,
+            0.282496214
+          ]
+        },
+        {
+          "name": "official_example_2",
+          "source_input_rec2020": [
+            12.3,
+            34.3,
+            56.9
+          ],
+          "input_ap0": [
+            23.046875,
+            35.4375,
+            56.28125
+          ],
+          "expected_linear_rec709": [
+            -0.694381595,
+            12.9282913,
+            16.6074142
+          ]
+        },
+        {
+          "name": "official_example_3",
+          "source_input_rec2020": [
+            1504.7,
+            64.51,
+            0.5
+          ],
+          "input_ap0": [
+            1032.0,
+            124.5,
+            1.384765625
+          ],
+          "expected_linear_rec709": [
+            16.4706345,
+            16.0539398,
+            8.77264404
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_0.978",
+          "source_input_rec2020": [
+            11.3284044,
+            45.3136177,
+            22.6568089
+          ],
+          "input_ap0": [
+            18.53125,
+            41.59375,
+            23.3125
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 0.977999985,
+          "expected_linear_rec709": [
+            -2.45648074,
+            16.0113125,
+            7.44573498
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_0.982",
+          "source_input_rec2020": [
+            11.7139225,
+            46.85569,
+            23.427845
+          ],
+          "input_ap0": [
+            19.171875,
+            43.03125,
+            24.09375
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 0.981999993,
+          "expected_linear_rec709": [
+            -2.43622875,
+            16.3028564,
+            7.62552166
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_1.158",
+          "source_input_rec2020": [
+            52.640873,
+            210.563492,
+            105.281746
+          ],
+          "input_ap0": [
+            86.125,
+            193.25,
+            108.3125
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 1.15799999,
+          "expected_linear_rec709": [
+            16.0,
+            16.0,
+            16.0
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_1.162",
+          "source_input_rec2020": [
+            54.5157471,
+            218.062988,
+            109.031494
+          ],
+          "input_ap0": [
+            89.1875,
+            200.25,
+            112.1875
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 1.16199994,
+          "expected_linear_rec709": [
+            16.0,
+            16.0,
+            16.0
+          ]
+        }
+      ]
+    },
+    {
+      "algorithm": "gt7",
+      "headroom": 40.0,
+      "source_url": "https://blog.selfshadow.com/publications/s2025-shading-course/pdi/supplemental/gt7_tone_mapping.cpp",
+      "source_sha256": "94df7e7e310b9423ebb5aaaa29416f376ebbae66e0948fb259f8688314b29822",
+      "source_version": "1.0 (2025-08-10)",
+      "oracle": "Compiled unmodified official GT7ToneMapping C++ ICtCp implementation",
+      "input_space": "scene-linear AP0 D60 quantized to rgba16float",
+      "output_space": "display-linear Rec.709 D65, GT 250-nit SDR white = 1",
+      "effective_headroom": 40.0,
+      "mode": "initializeAsHDR(10000 nits), output divided by 2.5",
+      "documented_peak_range": "250..10000 nits; requested headroom 64 is capped at 40 to preserve the official input contract",
+      "defaults": {
+        "alpha": 0.25,
+        "gray_point": 0.538,
+        "linear_section": 0.444,
+        "toe_strength": 1.28,
+        "blend_ratio": 0.6,
+        "chroma_fade_start": 0.98,
+        "chroma_fade_end": 1.16
+      },
+      "vectors": [
+        {
+          "name": "black",
+          "input_rec709": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "expected_linear_rec709": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "name": "near_black",
+          "input_rec709": [
+            0.0001,
+            0.0001,
+            0.0001
+          ],
+          "input_ap0": [
+            0.00010001659393310547,
+            0.00010001659393310547,
+            0.00010001659393310547
+          ],
+          "expected_linear_rec709": [
+            3.60855438e-06,
+            3.61096795e-06,
+            3.61071466e-06
+          ]
+        },
+        {
+          "name": "shadow_gray",
+          "input_rec709": [
+            0.01,
+            0.01,
+            0.01
+          ],
+          "input_ap0": [
+            0.01000213623046875,
+            0.01000213623046875,
+            0.01000213623046875
+          ],
+          "expected_linear_rec709": [
+            0.00131337228,
+            0.00131380185,
+            0.0013137369
+          ]
+        },
+        {
+          "name": "middle_gray",
+          "input_rec709": [
+            0.18,
+            0.18,
+            0.18
+          ],
+          "input_ap0": [
+            0.1800537109375,
+            0.179931640625,
+            0.179931640625
+          ],
+          "expected_linear_rec709": [
+            0.0580331385,
+            0.0579149388,
+            0.0579280779
+          ]
+        },
+        {
+          "name": "curve_midpoint",
+          "input_rec709": [
+            0.538,
+            0.538,
+            0.538
+          ],
+          "input_ap0": [
+            0.5380859375,
+            0.5380859375,
+            0.5380859375
+          ],
+          "expected_linear_rec709": [
+            0.215145767,
+            0.215276152,
+            0.215254948
+          ]
+        },
+        {
+          "name": "reference_white",
+          "input_rec709": [
+            1.0,
+            1.0,
+            1.0
+          ],
+          "input_ap0": [
+            1.0,
+            1.0,
+            1.0
+          ],
+          "expected_linear_rec709": [
+            0.399866611,
+            0.400050461,
+            0.40002057
+          ]
+        },
+        {
+          "name": "sdr_shoulder_join",
+          "input_rec709": [
+            1.11,
+            1.11,
+            1.11
+          ],
+          "input_ap0": [
+            1.1103515625,
+            1.1103515625,
+            1.1103515625
+          ],
+          "expected_linear_rec709": [
+            0.444071591,
+            0.444198251,
+            0.444178522
+          ]
+        },
+        {
+          "name": "sdr_paper_white",
+          "input_rec709": [
+            2.5,
+            2.5,
+            2.5
+          ],
+          "input_ap0": [
+            2.5,
+            2.5,
+            2.5
+          ],
+          "expected_linear_rec709": [
+            0.999968469,
+            1.00005245,
+            1.00008607
+          ]
+        },
+        {
+          "name": "highlight_gray",
+          "input_rec709": [
+            16.0,
+            16.0,
+            16.0
+          ],
+          "input_ap0": [
+            16.0,
+            16.0,
+            16.0
+          ],
+          "expected_linear_rec709": [
+            6.40006542,
+            6.40067625,
+            6.40060568
+          ]
+        },
+        {
+          "name": "very_bright_gray",
+          "input_rec709": [
+            4096.0,
+            4096.0,
+            4096.0
+          ],
+          "input_ap0": [
+            4096.0,
+            4096.0,
+            4096.0
+          ],
+          "expected_linear_rec709": [
+            40.0,
+            40.0,
+            40.0
+          ]
+        },
+        {
+          "name": "red",
+          "input_rec709": [
+            1.0,
+            0.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.439697265625,
+            0.0897216796875,
+            0.01751708984375
+          ],
+          "expected_linear_rec709": [
+            0.381994545,
+            -0.00581772719,
+            -0.0016356851
+          ]
+        },
+        {
+          "name": "green",
+          "input_rec709": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.383056640625,
+            0.8134765625,
+            0.11151123046875
+          ],
+          "expected_linear_rec709": [
+            -0.0034543965,
+            0.397880614,
+            -0.00587420538
+          ]
+        },
+        {
+          "name": "blue",
+          "input_rec709": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "input_ap0": [
+            0.1773681640625,
+            0.0968017578125,
+            0.87109375
+          ],
+          "expected_linear_rec709": [
+            -0.00519364327,
+            -0.00171089824,
+            0.377941251
+          ]
+        },
+        {
+          "name": "cyan",
+          "input_rec709": [
+            0.0,
+            1.0,
+            1.0
+          ],
+          "input_ap0": [
+            0.560546875,
+            0.91015625,
+            0.982421875
+          ],
+          "expected_linear_rec709": [
+            -0.00197331049,
+            0.399338722,
+            0.399268031
+          ]
+        },
+        {
+          "name": "magenta",
+          "input_rec709": [
+            1.0,
+            0.0,
+            1.0
+          ],
+          "input_ap0": [
+            0.6171875,
+            0.1865234375,
+            0.88818359375
+          ],
+          "expected_linear_rec709": [
+            0.38913399,
+            -0.00618713349,
+            0.386669934
+          ]
+        },
+        {
+          "name": "yellow",
+          "input_rec709": [
+            1.0,
+            1.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.82275390625,
+            0.9033203125,
+            0.1290283203125
+          ],
+          "expected_linear_rec709": [
+            0.399589539,
+            0.399350762,
+            -0.00625629723
+          ]
+        },
+        {
+          "name": "bright_red",
+          "input_rec709": [
+            64.0,
+            0.0,
+            0.0
+          ],
+          "input_ap0": [
+            28.140625,
+            5.7421875,
+            1.12109375
+          ],
+          "expected_linear_rec709": [
+            25.6043968,
+            -0.000198026886,
+            0.000208705664
+          ]
+        },
+        {
+          "name": "bright_green",
+          "input_rec709": [
+            0.0,
+            64.0,
+            0.0
+          ],
+          "input_ap0": [
+            24.515625,
+            52.0625,
+            7.13671875
+          ],
+          "expected_linear_rec709": [
+            0.131165564,
+            25.0689449,
+            0.0210165977
+          ]
+        },
+        {
+          "name": "bright_blue",
+          "input_rec709": [
+            0.0,
+            0.0,
+            64.0
+          ],
+          "input_ap0": [
+            11.3515625,
+            6.1953125,
+            55.75
+          ],
+          "expected_linear_rec709": [
+            0.0072273016,
+            0.00235851109,
+            25.1884937
+          ]
+        },
+        {
+          "name": "bright_yellow",
+          "input_rec709": [
+            64.0,
+            64.0,
+            0.0
+          ],
+          "input_ap0": [
+            52.65625,
+            57.8125,
+            8.2578125
+          ],
+          "expected_linear_rec709": [
+            24.8093719,
+            24.74506,
+            0.0417704582
+          ]
+        },
+        {
+          "name": "bright_cyan",
+          "input_rec709": [
+            0.0,
+            64.0,
+            64.0
+          ],
+          "input_ap0": [
+            35.875,
+            58.25,
+            62.875
+          ],
+          "expected_linear_rec709": [
+            0.168766618,
+            25.0026588,
+            24.9033203
+          ]
+        },
+        {
+          "name": "bright_magenta",
+          "input_rec709": [
+            64.0,
+            0.0,
+            64.0
+          ],
+          "input_ap0": [
+            39.5,
+            11.9375,
+            56.84375
+          ],
+          "expected_linear_rec709": [
+            25.5394325,
+            0.00236986578,
+            25.2870007
+          ]
+        },
+        {
+          "name": "blue_highlight",
+          "input_rec709": [
+            0.1,
+            0.4,
+            4.0
+          ],
+          "input_ap0": [
+            0.90673828125,
+            0.7216796875,
+            3.529296875
+          ],
+          "expected_linear_rec709": [
+            0.0378174484,
+            0.158924937,
+            1.59364402
+          ]
+        },
+        {
+          "name": "warm_highlight",
+          "input_rec709": [
+            100.0,
+            10.0,
+            1.0
+          ],
+          "input_ap0": [
+            47.96875,
+            17.203125,
+            3.736328125
+          ],
+          "expected_linear_rec709": [
+            38.5672798,
+            3.99868608,
+            0.401074409
+          ]
+        },
+        {
+          "name": "near_white_highlight",
+          "input_rec709": [
+            16.0,
+            14.0,
+            12.0
+          ],
+          "input_ap0": [
+            14.5234375,
+            13.984375,
+            12.2890625
+          ],
+          "expected_linear_rec709": [
+            6.39760637,
+            5.60057497,
+            4.79874516
+          ]
+        },
+        {
+          "name": "signed_rec709",
+          "input_rec709": [
+            -0.1,
+            0.2,
+            0.1
+          ],
+          "input_ap0": [
+            0.050384521484375,
+            0.1634521484375,
+            0.107666015625
+          ],
+          "expected_linear_rec709": [
+            -0.033925388,
+            0.0638914779,
+            0.0290143806
+          ]
+        },
+        {
+          "name": "ap0_red",
+          "input_ap0": [
+            16.0,
+            0.0,
+            0.0
+          ],
+          "expected_linear_rec709": [
+            15.8329382,
+            -1.18783784,
+            -0.153864965
+          ]
+        },
+        {
+          "name": "ap0_green",
+          "input_ap0": [
+            0.0,
+            16.0,
+            0.0
+          ],
+          "expected_linear_rec709": [
+            -4.44573259,
+            8.57082558,
+            -0.760910213
+          ]
+        },
+        {
+          "name": "ap0_blue",
+          "input_ap0": [
+            0.0,
+            0.0,
+            16.0
+          ],
+          "expected_linear_rec709": [
+            -0.48080501,
+            -0.0551385656,
+            7.3862114
+          ]
+        },
+        {
+          "name": "negative_ap0",
+          "input_ap0": [
+            -1.0,
+            -1.0,
+            -1.0
+          ],
+          "expected_linear_rec709": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "name": "official_example_1",
+          "source_input_rec2020": [
+            0.5,
+            1.23,
+            0.75
+          ],
+          "input_ap0": [
+            0.65576171875,
+            1.150390625,
+            0.763671875
+          ],
+          "expected_linear_rec709": [
+            0.0211459789,
+            0.529720545,
+            0.282496214
+          ]
+        },
+        {
+          "name": "official_example_2",
+          "source_input_rec2020": [
+            12.3,
+            34.3,
+            56.9
+          ],
+          "input_ap0": [
+            23.046875,
+            35.4375,
+            56.28125
+          ],
+          "expected_linear_rec709": [
+            -1.53903556,
+            14.7185841,
+            23.7710209
+          ]
+        },
+        {
+          "name": "official_example_3",
+          "source_input_rec2020": [
+            1504.7,
+            64.51,
+            0.5
+          ],
+          "input_ap0": [
+            1032.0,
+            124.5,
+            1.384765625
+          ],
+          "expected_linear_rec709": [
+            43.694397,
+            26.117342,
+            15.6503496
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_0.978",
+          "source_input_rec2020": [
+            27.6172447,
+            110.468979,
+            55.2344894
+          ],
+          "input_ap0": [
+            45.1875,
+            101.4375,
+            56.8125
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 0.977999985,
+          "expected_linear_rec709": [
+            -6.05194759,
+            39.4459457,
+            18.2677841
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_0.982",
+          "source_input_rec2020": [
+            28.6811466,
+            114.724586,
+            57.3622932
+          ],
+          "input_ap0": [
+            46.9375,
+            105.3125,
+            59.0
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 0.981999993,
+          "expected_linear_rec709": [
+            -5.99150181,
+            40.2566643,
+            18.8039093
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_1.158",
+          "source_input_rec2020": [
+            163.265625,
+            653.0625,
+            326.53125
+          ],
+          "input_ap0": [
+            267.25,
+            599.5,
+            336.0
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 1.15799999,
+          "expected_linear_rec709": [
+            40.0,
+            40.0,
+            40.0
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_1.162",
+          "source_input_rec2020": [
+            170.219925,
+            680.8797,
+            340.43985
+          ],
+          "input_ap0": [
+            278.5,
+            625.0,
+            350.25
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 1.16199994,
+          "expected_linear_rec709": [
+            40.0,
+            40.0,
+            40.0
+          ]
+        }
+      ]
+    },
+    {
+      "algorithm": "gt7",
+      "headroom": 64.0,
+      "source_url": "https://blog.selfshadow.com/publications/s2025-shading-course/pdi/supplemental/gt7_tone_mapping.cpp",
+      "source_sha256": "94df7e7e310b9423ebb5aaaa29416f376ebbae66e0948fb259f8688314b29822",
+      "source_version": "1.0 (2025-08-10)",
+      "oracle": "Compiled unmodified official GT7ToneMapping C++ ICtCp implementation",
+      "input_space": "scene-linear AP0 D60 quantized to rgba16float",
+      "output_space": "display-linear Rec.709 D65, GT 250-nit SDR white = 1",
+      "effective_headroom": 40.0,
+      "mode": "initializeAsHDR(10000 nits), output divided by 2.5",
+      "documented_peak_range": "250..10000 nits; requested headroom 64 is capped at 40 to preserve the official input contract",
+      "defaults": {
+        "alpha": 0.25,
+        "gray_point": 0.538,
+        "linear_section": 0.444,
+        "toe_strength": 1.28,
+        "blend_ratio": 0.6,
+        "chroma_fade_start": 0.98,
+        "chroma_fade_end": 1.16
+      },
+      "vectors": [
+        {
+          "name": "black",
+          "input_rec709": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "expected_linear_rec709": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "name": "near_black",
+          "input_rec709": [
+            0.0001,
+            0.0001,
+            0.0001
+          ],
+          "input_ap0": [
+            0.00010001659393310547,
+            0.00010001659393310547,
+            0.00010001659393310547
+          ],
+          "expected_linear_rec709": [
+            3.60855438e-06,
+            3.61096795e-06,
+            3.61071466e-06
+          ]
+        },
+        {
+          "name": "shadow_gray",
+          "input_rec709": [
+            0.01,
+            0.01,
+            0.01
+          ],
+          "input_ap0": [
+            0.01000213623046875,
+            0.01000213623046875,
+            0.01000213623046875
+          ],
+          "expected_linear_rec709": [
+            0.00131337228,
+            0.00131380185,
+            0.0013137369
+          ]
+        },
+        {
+          "name": "middle_gray",
+          "input_rec709": [
+            0.18,
+            0.18,
+            0.18
+          ],
+          "input_ap0": [
+            0.1800537109375,
+            0.179931640625,
+            0.179931640625
+          ],
+          "expected_linear_rec709": [
+            0.0580331385,
+            0.0579149388,
+            0.0579280779
+          ]
+        },
+        {
+          "name": "curve_midpoint",
+          "input_rec709": [
+            0.538,
+            0.538,
+            0.538
+          ],
+          "input_ap0": [
+            0.5380859375,
+            0.5380859375,
+            0.5380859375
+          ],
+          "expected_linear_rec709": [
+            0.215145767,
+            0.215276152,
+            0.215254948
+          ]
+        },
+        {
+          "name": "reference_white",
+          "input_rec709": [
+            1.0,
+            1.0,
+            1.0
+          ],
+          "input_ap0": [
+            1.0,
+            1.0,
+            1.0
+          ],
+          "expected_linear_rec709": [
+            0.399866611,
+            0.400050461,
+            0.40002057
+          ]
+        },
+        {
+          "name": "sdr_shoulder_join",
+          "input_rec709": [
+            1.11,
+            1.11,
+            1.11
+          ],
+          "input_ap0": [
+            1.1103515625,
+            1.1103515625,
+            1.1103515625
+          ],
+          "expected_linear_rec709": [
+            0.444071591,
+            0.444198251,
+            0.444178522
+          ]
+        },
+        {
+          "name": "sdr_paper_white",
+          "input_rec709": [
+            2.5,
+            2.5,
+            2.5
+          ],
+          "input_ap0": [
+            2.5,
+            2.5,
+            2.5
+          ],
+          "expected_linear_rec709": [
+            0.999968469,
+            1.00005245,
+            1.00008607
+          ]
+        },
+        {
+          "name": "highlight_gray",
+          "input_rec709": [
+            16.0,
+            16.0,
+            16.0
+          ],
+          "input_ap0": [
+            16.0,
+            16.0,
+            16.0
+          ],
+          "expected_linear_rec709": [
+            6.40006542,
+            6.40067625,
+            6.40060568
+          ]
+        },
+        {
+          "name": "very_bright_gray",
+          "input_rec709": [
+            4096.0,
+            4096.0,
+            4096.0
+          ],
+          "input_ap0": [
+            4096.0,
+            4096.0,
+            4096.0
+          ],
+          "expected_linear_rec709": [
+            40.0,
+            40.0,
+            40.0
+          ]
+        },
+        {
+          "name": "red",
+          "input_rec709": [
+            1.0,
+            0.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.439697265625,
+            0.0897216796875,
+            0.01751708984375
+          ],
+          "expected_linear_rec709": [
+            0.381994545,
+            -0.00581772719,
+            -0.0016356851
+          ]
+        },
+        {
+          "name": "green",
+          "input_rec709": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.383056640625,
+            0.8134765625,
+            0.11151123046875
+          ],
+          "expected_linear_rec709": [
+            -0.0034543965,
+            0.397880614,
+            -0.00587420538
+          ]
+        },
+        {
+          "name": "blue",
+          "input_rec709": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "input_ap0": [
+            0.1773681640625,
+            0.0968017578125,
+            0.87109375
+          ],
+          "expected_linear_rec709": [
+            -0.00519364327,
+            -0.00171089824,
+            0.377941251
+          ]
+        },
+        {
+          "name": "cyan",
+          "input_rec709": [
+            0.0,
+            1.0,
+            1.0
+          ],
+          "input_ap0": [
+            0.560546875,
+            0.91015625,
+            0.982421875
+          ],
+          "expected_linear_rec709": [
+            -0.00197331049,
+            0.399338722,
+            0.399268031
+          ]
+        },
+        {
+          "name": "magenta",
+          "input_rec709": [
+            1.0,
+            0.0,
+            1.0
+          ],
+          "input_ap0": [
+            0.6171875,
+            0.1865234375,
+            0.88818359375
+          ],
+          "expected_linear_rec709": [
+            0.38913399,
+            -0.00618713349,
+            0.386669934
+          ]
+        },
+        {
+          "name": "yellow",
+          "input_rec709": [
+            1.0,
+            1.0,
+            0.0
+          ],
+          "input_ap0": [
+            0.82275390625,
+            0.9033203125,
+            0.1290283203125
+          ],
+          "expected_linear_rec709": [
+            0.399589539,
+            0.399350762,
+            -0.00625629723
+          ]
+        },
+        {
+          "name": "bright_red",
+          "input_rec709": [
+            64.0,
+            0.0,
+            0.0
+          ],
+          "input_ap0": [
+            28.140625,
+            5.7421875,
+            1.12109375
+          ],
+          "expected_linear_rec709": [
+            25.6043968,
+            -0.000198026886,
+            0.000208705664
+          ]
+        },
+        {
+          "name": "bright_green",
+          "input_rec709": [
+            0.0,
+            64.0,
+            0.0
+          ],
+          "input_ap0": [
+            24.515625,
+            52.0625,
+            7.13671875
+          ],
+          "expected_linear_rec709": [
+            0.131165564,
+            25.0689449,
+            0.0210165977
+          ]
+        },
+        {
+          "name": "bright_blue",
+          "input_rec709": [
+            0.0,
+            0.0,
+            64.0
+          ],
+          "input_ap0": [
+            11.3515625,
+            6.1953125,
+            55.75
+          ],
+          "expected_linear_rec709": [
+            0.0072273016,
+            0.00235851109,
+            25.1884937
+          ]
+        },
+        {
+          "name": "bright_yellow",
+          "input_rec709": [
+            64.0,
+            64.0,
+            0.0
+          ],
+          "input_ap0": [
+            52.65625,
+            57.8125,
+            8.2578125
+          ],
+          "expected_linear_rec709": [
+            24.8093719,
+            24.74506,
+            0.0417704582
+          ]
+        },
+        {
+          "name": "bright_cyan",
+          "input_rec709": [
+            0.0,
+            64.0,
+            64.0
+          ],
+          "input_ap0": [
+            35.875,
+            58.25,
+            62.875
+          ],
+          "expected_linear_rec709": [
+            0.168766618,
+            25.0026588,
+            24.9033203
+          ]
+        },
+        {
+          "name": "bright_magenta",
+          "input_rec709": [
+            64.0,
+            0.0,
+            64.0
+          ],
+          "input_ap0": [
+            39.5,
+            11.9375,
+            56.84375
+          ],
+          "expected_linear_rec709": [
+            25.5394325,
+            0.00236986578,
+            25.2870007
+          ]
+        },
+        {
+          "name": "blue_highlight",
+          "input_rec709": [
+            0.1,
+            0.4,
+            4.0
+          ],
+          "input_ap0": [
+            0.90673828125,
+            0.7216796875,
+            3.529296875
+          ],
+          "expected_linear_rec709": [
+            0.0378174484,
+            0.158924937,
+            1.59364402
+          ]
+        },
+        {
+          "name": "warm_highlight",
+          "input_rec709": [
+            100.0,
+            10.0,
+            1.0
+          ],
+          "input_ap0": [
+            47.96875,
+            17.203125,
+            3.736328125
+          ],
+          "expected_linear_rec709": [
+            38.5672798,
+            3.99868608,
+            0.401074409
+          ]
+        },
+        {
+          "name": "near_white_highlight",
+          "input_rec709": [
+            16.0,
+            14.0,
+            12.0
+          ],
+          "input_ap0": [
+            14.5234375,
+            13.984375,
+            12.2890625
+          ],
+          "expected_linear_rec709": [
+            6.39760637,
+            5.60057497,
+            4.79874516
+          ]
+        },
+        {
+          "name": "signed_rec709",
+          "input_rec709": [
+            -0.1,
+            0.2,
+            0.1
+          ],
+          "input_ap0": [
+            0.050384521484375,
+            0.1634521484375,
+            0.107666015625
+          ],
+          "expected_linear_rec709": [
+            -0.033925388,
+            0.0638914779,
+            0.0290143806
+          ]
+        },
+        {
+          "name": "ap0_red",
+          "input_ap0": [
+            16.0,
+            0.0,
+            0.0
+          ],
+          "expected_linear_rec709": [
+            15.8329382,
+            -1.18783784,
+            -0.153864965
+          ]
+        },
+        {
+          "name": "ap0_green",
+          "input_ap0": [
+            0.0,
+            16.0,
+            0.0
+          ],
+          "expected_linear_rec709": [
+            -4.44573259,
+            8.57082558,
+            -0.760910213
+          ]
+        },
+        {
+          "name": "ap0_blue",
+          "input_ap0": [
+            0.0,
+            0.0,
+            16.0
+          ],
+          "expected_linear_rec709": [
+            -0.48080501,
+            -0.0551385656,
+            7.3862114
+          ]
+        },
+        {
+          "name": "negative_ap0",
+          "input_ap0": [
+            -1.0,
+            -1.0,
+            -1.0
+          ],
+          "expected_linear_rec709": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "name": "official_example_1",
+          "source_input_rec2020": [
+            0.5,
+            1.23,
+            0.75
+          ],
+          "input_ap0": [
+            0.65576171875,
+            1.150390625,
+            0.763671875
+          ],
+          "expected_linear_rec709": [
+            0.0211459789,
+            0.529720545,
+            0.282496214
+          ]
+        },
+        {
+          "name": "official_example_2",
+          "source_input_rec2020": [
+            12.3,
+            34.3,
+            56.9
+          ],
+          "input_ap0": [
+            23.046875,
+            35.4375,
+            56.28125
+          ],
+          "expected_linear_rec709": [
+            -1.53903556,
+            14.7185841,
+            23.7710209
+          ]
+        },
+        {
+          "name": "official_example_3",
+          "source_input_rec2020": [
+            1504.7,
+            64.51,
+            0.5
+          ],
+          "input_ap0": [
+            1032.0,
+            124.5,
+            1.384765625
+          ],
+          "expected_linear_rec709": [
+            43.694397,
+            26.117342,
+            15.6503496
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_0.978",
+          "source_input_rec2020": [
+            27.6172447,
+            110.468979,
+            55.2344894
+          ],
+          "input_ap0": [
+            45.1875,
+            101.4375,
+            56.8125
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 0.977999985,
+          "expected_linear_rec709": [
+            -6.05194759,
+            39.4459457,
+            18.2677841
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_0.982",
+          "source_input_rec2020": [
+            28.6811466,
+            114.724586,
+            57.3622932
+          ],
+          "input_ap0": [
+            46.9375,
+            105.3125,
+            59.0
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 0.981999993,
+          "expected_linear_rec709": [
+            -5.99150181,
+            40.2566643,
+            18.8039093
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_1.158",
+          "source_input_rec2020": [
+            163.265625,
+            653.0625,
+            326.53125
+          ],
+          "input_ap0": [
+            267.25,
+            599.5,
+            336.0
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 1.15799999,
+          "expected_linear_rec709": [
+            40.0,
+            40.0,
+            40.0
+          ]
+        },
+        {
+          "name": "chroma_fade_ratio_1.162",
+          "source_input_rec2020": [
+            170.219925,
+            680.8797,
+            340.43985
+          ],
+          "input_ap0": [
+            278.5,
+            625.0,
+            350.25
+          ],
+          "source_ictcp_intensity_ratio_before_f16": 1.16199994,
+          "expected_linear_rec709": [
+            40.0,
+            40.0,
+            40.0
+          ]
+        }
+      ]
+    }
+  ]
+}

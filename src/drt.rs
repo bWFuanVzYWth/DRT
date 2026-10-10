@@ -12,13 +12,14 @@ pub enum DrtKind {
     Lottes,
     OpenDrt,
     Uchimura,
+    Gt7,
     AcesFitted,
     OklabAces,
     RgbReinhard,
 }
 
 impl DrtKind {
-    pub const REFERENCES: [Self; 12] = [
+    pub const REFERENCES: [Self; 13] = [
         Self::AgxS2O3,
         Self::Aces13,
         Self::Aces20,
@@ -30,10 +31,11 @@ impl DrtKind {
         Self::Lottes,
         Self::OpenDrt,
         Self::Uchimura,
+        Self::Gt7,
         Self::AcesFitted,
     ];
     pub const RESEARCH: [Self; 2] = [Self::OklabAces, Self::RgbReinhard];
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::None,
         Self::AgxS2O3,
         Self::Aces13,
@@ -46,6 +48,7 @@ impl DrtKind {
         Self::Lottes,
         Self::OpenDrt,
         Self::Uchimura,
+        Self::Gt7,
         Self::AcesFitted,
         Self::OklabAces,
         Self::RgbReinhard,
@@ -65,6 +68,7 @@ impl DrtKind {
             Self::Lottes => "Lottes 2016",
             Self::OpenDrt => "OpenDRT",
             Self::Uchimura => "Uchimura / GT",
+            Self::Gt7 => "GT7 Tone Mapping",
             Self::AcesFitted => "ACES Filmic Fitted",
             Self::OklabAces => "Oklab ACES-inspired",
             Self::RgbReinhard => "RGB Reinhard",
@@ -105,6 +109,9 @@ impl DrtKind {
             Self::Uchimura => {
                 "Hajime Uchimura's Gran Turismo toe, linear midsection and shoulder; variable display peak"
             }
+            Self::Gt7 => {
+                "Polyphony Digital's GT7 sigmoid and ICtCp color-volume mapping; SDR/HDR reference"
+            }
             Self::AcesFitted => {
                 "Krzysztof Narkowicz's five-coefficient ACES Filmic fit; SDR approximation"
             }
@@ -131,6 +138,7 @@ impl DrtKind {
             Self::Lottes => "reference/lottes.wgsl",
             Self::OpenDrt => "reference/opendrt.wgsl",
             Self::Uchimura => "reference/uchimura.wgsl",
+            Self::Gt7 => "reference/gt7.wgsl",
             Self::AcesFitted => "reference/aces_fitted.wgsl",
             Self::OklabAces => "research/oklab_aces.wgsl",
             Self::RgbReinhard => "research/rgb_reinhard.wgsl",
@@ -160,6 +168,7 @@ impl DrtKind {
                 | Self::FidelityFxLpm
                 | Self::OpenDrt
                 | Self::Uchimura
+                | Self::Gt7
         )
     }
 
@@ -193,6 +202,9 @@ impl DrtKind {
                 "https://github.com/jedypod/open-display-transform/blob/af683323e2a8a63501f02c0a724ec538e3228ad0/display-transforms/opendrt/OpenDRT.dctl"
             }
             Self::Uchimura => "https://www.polyphony.co.jp/publications/sa2018/",
+            Self::Gt7 => {
+                "https://blog.selfshadow.com/publications/s2025-shading-course/pdi/supplemental/gt7_tone_mapping.cpp"
+            }
             Self::AcesFitted => {
                 "https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/"
             }
