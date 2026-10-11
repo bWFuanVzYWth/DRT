@@ -14,7 +14,7 @@ use crate::{
 const BUILT_OKLAB_ACES_SHADER: &str = include_str!("../shaders/research/oklab_aces.wgsl");
 const BUILT_AGX_S2O3_SHADER: &str = include_str!("../shaders/reference/agx_s2o3.wgsl");
 const BUILT_RGB_REINHARD_SHADER: &str = include_str!("../shaders/research/rgb_reinhard.wgsl");
-pub const DEFAULT_COMPRESSION_START: f32 = 0.18;
+pub const DEFAULT_COMPRESSION_START: f32 = 0.5;
 pub const DEFAULT_GAMUT_COMPRESSION: f32 = 0.04;
 
 const BUILT_NONE_SHADER: &str = include_str!("../shaders/none_drt.wgsl");
@@ -1385,6 +1385,7 @@ mod tests {
 
         assert_eq!(DEFAULT_GAMUT_COMPRESSION, 0.04);
         assert_eq!(source.linear_slope, 1.0);
+        assert_eq!(source.compression_start, 0.5);
         assert_eq!(source.highlight_reach_ev, 10.0);
         assert_eq!(source.hue_retention, 0.75);
         assert_eq!(
@@ -1509,10 +1510,12 @@ mod tests {
                 assert_eq!(curve.map_linear(0.0), 0.0);
                 assert!((curve.map_linear(0.09) - 0.5 * target_middle_gray).abs() < 1.0e-6);
                 assert!(
-                    (curve.shoulder_scale * (curve.curve_peak - curve.compression_start_output)
-                        - curve.linear_slope)
+                    // Compare peaks instead of subtracting the nearly equal
+                    // peak and join when the constrained join is close to 1.
+                    (curve.compression_start_output + curve.linear_slope / curve.shoulder_scale
+                        - curve.curve_peak)
                         .abs()
-                        < 1.0e-6
+                        < 4.0 * f32::EPSILON * headroom
                 );
                 assert!(
                     (curve.highlight_reach_ev - (source.highlight_reach_ev + headroom.log2()))
@@ -1546,8 +1549,8 @@ mod tests {
                     let curve = source.curve_for_headroom(headroom);
                     let start = curve.compression_start;
                     let join = curve.map_linear(start);
-                    assert_eq!(start, DEFAULT_COMPRESSION_START);
-                    assert_eq!(join, linear_slope * DEFAULT_COMPRESSION_START);
+                    assert_eq!(start, DEFAULT_COMPRESSION_START.min(0.99 / linear_slope));
+                    assert_eq!(join, linear_slope * start);
                     assert_eq!(curve.map_linear(0.0), 0.0);
                     assert_eq!(curve.map_linear(start * 0.5), join * 0.5);
                     assert!(curve.curve_peak.is_finite() && curve.curve_peak >= headroom);
@@ -1555,7 +1558,7 @@ mod tests {
                     let step = 1.0e-5 / linear_slope;
                     let right_slope = (curve.map_linear(start + step) - join) / step;
                     assert!((right_slope / linear_slope - 1.0).abs() < 0.02);
-                    let reach = DEFAULT_COMPRESSION_START * 2.0_f32.powf(curve.highlight_reach_ev);
+                    let reach = 0.18 * 2.0_f32.powf(curve.highlight_reach_ev);
                     assert!((curve.map_linear(reach) / headroom - 1.0).abs() < 2.0e-5);
                     let mut previous = 0.0;
                     for index in 1..=100 {
